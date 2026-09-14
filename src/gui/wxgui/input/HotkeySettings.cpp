@@ -17,6 +17,8 @@
 #include "resource/embedded/resources.h"
 #endif
 
+#include "Cafe/FrameDump/FrameDumper.h"
+
 std::optional<fs::path> GenerateScreenshotFilename(bool isDRC)
 {
 	fs::path screendir = ActiveSettings::GetUserDataPath("screenshots");
