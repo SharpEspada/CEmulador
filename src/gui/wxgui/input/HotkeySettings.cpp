@@ -18,6 +18,8 @@
 #endif
 
 #include "Cafe/FrameDump/FrameDumper.h"
+#include "audio/IAudioAPI.h"
+#include "Cafe/HW/Latte/Core/LatteOverlay.h"
 
 std::optional<fs::path> GenerateScreenshotFilename(bool isDRC)
 {
