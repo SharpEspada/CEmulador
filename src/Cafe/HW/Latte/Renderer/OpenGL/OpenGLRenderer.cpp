@@ -581,6 +581,41 @@ void OpenGLRenderer::HandleScreenshotRequest(LatteTextureView* texView, bool pad
 	SaveScreenshot(rgb_data, screenshotWidth, screenshotHeight, !padView);
 }
 
+bool OpenGLRenderer::CaptureFrameForDump(LatteTextureView* texView, std::vector<uint8>& outBGRA, uint32& outWidth, uint32& outHeight)
+{
+	int width, height;
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+	texture_bindAndActivate(texView, 0);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+
+	outBGRA.resize(static_cast<size_t>(width) * height * 4);
+
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, outBGRA.data());
+	glPixelStorei(GL_PACK_ALIGNMENT, 4);
+	texture_bindAndActivate(nullptr, 0);
+
+	// même correction sRGB que HandleScreenshotRequest ; l'ordre des canaux
+	// (BGRA au lieu de RGB) ne change rien à la formule, chaque canal est
+	// corrigé indépendamment
+	const bool srcUsesSRGB = HAS_FLAG(texView->format, Latte::E_GX2SURFFMT::FMT_BIT_SRGB);
+	const bool dstUsesSRGB = LatteGPUState.tvBufferUsesSRGB;
+	if (srcUsesSRGB != dstUsesSRGB)
+	{
+		for (size_t i = 0; i < outBGRA.size(); i += 4)
+		{
+			uint8* p = outBGRA.data() + i;
+			for (int c = 0; c < 3; ++c)
+				p[c] = srcUsesSRGB ? SRGBComponentToRGB(p[c]) : RGBComponentToSRGB(p[c]);
+		}
+	}
+
+	outWidth = static_cast<uint32>(width);
+	outHeight = static_cast<uint32>(height);
+	return true;
+}
+
 void OpenGLRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter, sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight, bool padView, bool clearBackground)
 {
 	if (padView && !IsPadWindowActive())
