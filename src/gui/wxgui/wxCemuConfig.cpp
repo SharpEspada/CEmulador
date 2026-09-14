@@ -114,6 +114,7 @@ void wxCemuConfig::Load(XMLConfigParser& parser)
 	hotkeys.toggleFullscreen = xml_hotkeys.get("ToggleFullscreen", sHotkeyCfg{uKeyboardHotkey{WXK_F11}});
 	hotkeys.toggleFullscreenAlt = xml_hotkeys.get("ToggleFullscreenAlt", sHotkeyCfg{uKeyboardHotkey{WXK_CONTROL_M, true}}); // ALT+ENTER
 	hotkeys.takeScreenshot = xml_hotkeys.get("TakeScreenshot", sHotkeyCfg{uKeyboardHotkey{WXK_F12}});
+	hotkeys.toggleFrameDump = xml_hotkeys.get("ToggleFrameDump", sHotkeyCfg{uKeyboardHotkey{WXK_F10}});
 	hotkeys.toggleFastForward = xml_hotkeys.get("ToggleFastForward", sHotkeyCfg{});
 	hotkeys.exitApplication = xml_hotkeys.get("ExitApplication", sHotkeyCfg{});
 #ifdef CEMU_DEBUG_ASSERT
@@ -185,6 +186,7 @@ void wxCemuConfig::Save(XMLConfigParser& config)
 	xml_hotkeys.set("ToggleFullscreen", hotkeys.toggleFullscreen);
 	xml_hotkeys.set("ToggleFullscreenAlt", hotkeys.toggleFullscreenAlt);
 	xml_hotkeys.set("TakeScreenshot", hotkeys.takeScreenshot);
+	xml_hotkeys.set("ToggleFrameDump", hotkeys.toggleFrameDump);
 	xml_hotkeys.set("ToggleFastForward", hotkeys.toggleFastForward);
 	xml_hotkeys.set("ExitApplication", hotkeys.exitApplication);
 }
