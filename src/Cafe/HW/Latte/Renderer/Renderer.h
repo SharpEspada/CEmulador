@@ -193,8 +193,6 @@ protected:
 	std::unique_ptr<DXGIWrapper> m_dxgi_wrapper{};
 #endif
 public:
-	virtual void HandleScreenshotRequest(LatteTextureView* texView, bool padView){}
-
 	// Frame dumping: synchronous GPU->CPU capture of texView into 32bpp
 	// top-down BGRA. Returns false if unsupported by this backend or if the
 	// capture failed for this frame (caller must treat this as "skip frame",
