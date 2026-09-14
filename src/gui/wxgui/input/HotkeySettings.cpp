@@ -157,6 +157,7 @@ HotkeySettings::HotkeySettings(wxWindow* parent)
 	/* hotkeys */
 	CreateHotkeyRow(_tr("Toggle fullscreen"), s_cfgHotkeys.toggleFullscreen);
 	CreateHotkeyRow(_tr("Take screenshot"), s_cfgHotkeys.takeScreenshot);
+	CreateHotkeyRow(_tr("Toggle frame dump"), s_cfgHotkeys.toggleFrameDump);
 	CreateHotkeyRow(_tr("Toggle fast-forward"), s_cfgHotkeys.toggleFastForward);
 #ifdef CEMU_DEBUG_ASSERT
 	CreateHotkeyRow(_tr("End emulation"), s_cfgHotkeys.endEmulation);
@@ -193,6 +194,22 @@ void HotkeySettings::Init(MainWindow* mainWindowFrame)
 		{&s_cfgHotkeys.takeScreenshot, [](void) {
 			 if (g_renderer)
 				 g_renderer->RequestScreenshot(SaveScreenshot);
+		 }},
+		{&s_cfgHotkeys.toggleFrameDump, [](void) {
+			 if (!g_frameDumper)
+				 g_frameDumper = std::make_unique<FrameDumper>();
+			 if (g_frameDumper->IsActive())
+			 {
+				 g_frameDumper->Stop();
+				 LatteOverlay_pushNotification(_tr("Frame dump stopped"), 2500);
+			 }
+			 else
+			 {
+				 const uint32 sampleRate = 48000;
+				 const uint16 channels = g_tvAudio ? g_tvAudio->GetChannels() : 2;
+				 if (g_frameDumper->Start(ActiveSettings::GetUserDataPath("framedump"), sampleRate, channels))
+					 LatteOverlay_pushNotification(_tr("Frame dump started"), 2500);
+			 }
 		 }},
 		{&s_cfgHotkeys.toggleFastForward, [](void) {
 			 ActiveSettings::SetTimerShiftFactor((ActiveSettings::GetTimerShiftFactor() < 3) ? 3 : 1);
