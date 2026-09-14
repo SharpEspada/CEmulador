@@ -119,6 +119,10 @@ add_library(CemuCafe
   HW/Latte/Core/LatteQuery.cpp
   HW/Latte/Core/LatteQueryObject.h
   HW/Latte/Core/LatteRenderTarget.cpp
+  FrameDump/AviWriter.cpp
+  FrameDump/AviWriter.h
+  FrameDump/FrameDumper.cpp
+  FrameDump/FrameDumper.h
   HW/Latte/Core/LatteRingBuffer.cpp
   HW/Latte/Core/LatteRingBuffer.h
   HW/Latte/Core/LatteShaderAssembly.h
