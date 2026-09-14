@@ -192,6 +192,14 @@ protected:
 #if BOOST_OS_WINDOWS
 	std::unique_ptr<DXGIWrapper> m_dxgi_wrapper{};
 #endif
+public:
+	virtual void HandleScreenshotRequest(LatteTextureView* texView, bool padView){}
+
+	// Frame dumping: synchronous GPU->CPU capture of texView into 32bpp
+	// top-down BGRA. Returns false if unsupported by this backend or if the
+	// capture failed for this frame (caller must treat this as "skip frame",
+	// never as fatal). See FrameDump/FrameDumper.h for the full rationale.
+	virtual bool CaptureFrameForDump(LatteTextureView* texView, std::vector<uint8>& outBGRA, uint32& outWidth, uint32& outHeight) { return false; }
 };
 
 extern std::unique_ptr<Renderer> g_renderer;
