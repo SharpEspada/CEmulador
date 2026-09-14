@@ -4,6 +4,7 @@
 #include "audio/IAudioAPI.h"
 //#include "ax.h"
 #include "config/CemuConfig.h"
+#include "Cafe/FrameDump/FrameDumper.h"
 
 namespace snd_core
 {
@@ -185,6 +186,9 @@ namespace snd_core
 		{
 			if(g_tvAudio)
 				g_tvAudio->FeedBlock(tempTVChannelData);
+
+			if (g_frameDumper)
+				g_frameDumper->PushAudioBlock(tempTVChannelData, snd_core::AX_SAMPLES_PER_3MS_48KHZ * AX_FRAMES_PER_GROUP, channels);
 
 			tempAudioBlockCounter = 0;
 		}
