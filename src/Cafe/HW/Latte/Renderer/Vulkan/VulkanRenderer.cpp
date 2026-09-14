@@ -1277,6 +1277,279 @@ void VulkanRenderer::HandleScreenshotRequest(LatteTextureView* texView, bool pad
 		SaveScreenshot(rgb_data, width, height, !padView);
 }
 
+
+bool VulkanRenderer::CaptureFrameForDump(LatteTextureView* texView, std::vector<uint8>& outBGRA, uint32& outWidth, uint32& outHeight)
+{
+	auto texViewVk = (LatteTextureViewVk*)texView;
+	auto baseImageTex = texViewVk->GetBaseImage();
+
+	auto textureVk = baseImageTex->GetImageObj();
+	textureVk->flagForCurrentCommandBuffer();
+
+	auto dumpImage = textureVk->m_image;
+	auto baseImage = dumpImage;
+
+	int width, height;
+	baseImageTex->GetEffectiveSize(width, height, 0);
+
+	VkImage image = nullptr;
+	VkDeviceMemory imageMemory = nullptr;
+
+	if (texViewVk->firstMip != 0)
+	{
+		cemuLog_log(LogType::Force, "FrameDumper: capturing non-zero mip is not supported");
+		return false;
+	}
+
+	auto format = baseImageTex->GetFormat();
+	if (format != VK_FORMAT_R8G8B8A8_UNORM && format != VK_FORMAT_R8G8B8A8_SRGB && format != VK_FORMAT_R8G8B8_UNORM && format != VK_FORMAT_R8G8B8_SRGB)
+	{
+		VkFormatProperties formatProps;
+		vkGetPhysicalDeviceFormatProperties(m_physicalDevice, format, &formatProps);
+		bool supportsBlit = (formatProps.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) != 0;
+
+		const bool dstUsesSRGB = LatteGPUState.tvBufferUsesSRGB; // TV only: FrameDumper never calls this for the pad view
+		const auto blitFormat = dstUsesSRGB ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+
+		vkGetPhysicalDeviceFormatProperties(m_physicalDevice, blitFormat, &formatProps);
+		supportsBlit &= (formatProps.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) != 0;
+
+		if (!supportsBlit)
+		{
+			cemuLog_log(LogType::Force, "FrameDumper: framebuffer is not in RGB8 format and blitting is unsupported");
+			return false;
+		}
+
+		// convert texture using blitting (identique à HandleScreenshotRequest)
+		VkImageCreateInfo imageInfo{};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.format = blitFormat;
+		imageInfo.extent = {(uint32)width, (uint32)height, 1};
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.arrayLayers = 1;
+		imageInfo.mipLevels = 1;
+		imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+
+		if (vkCreateImage(m_logicalDevice, &imageInfo, nullptr, &image) != VK_SUCCESS)
+			return false;
+
+		VkMemoryRequirements memRequirements;
+		vkGetImageMemoryRequirements(m_logicalDevice, image, &memRequirements);
+
+		VkMemoryAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocInfo.allocationSize = memRequirements.size;
+		uint32 memIndex;
+		bool foundMemory = memoryManager->FindMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, memIndex);
+		if (!foundMemory)
+		{
+			vkDestroyImage(m_logicalDevice, image, nullptr);
+			cemuLog_log(LogType::Force, "FrameDumper: capture failed due to incompatible vulkan memory types.");
+			return false;
+		}
+		allocInfo.memoryTypeIndex = memIndex;
+
+		if (vkAllocateMemory(m_logicalDevice, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS)
+		{
+			vkDestroyImage(m_logicalDevice, image, nullptr);
+			cemuLog_log(LogType::Force, "FrameDumper: capture failed due to failed memory allocation.");
+			return false;
+		}
+
+		vkBindImageMemory(m_logicalDevice, image, imageMemory, 0);
+
+		// prepare dst image for blitting
+		{
+			VkImageSubresourceRange range;
+			range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			range.baseMipLevel = 0;
+			range.levelCount = 1;
+			range.baseArrayLayer = 0;
+			range.layerCount = 1;
+			barrier_image<TRANSFER_READ, TRANSFER_WRITE>(image, range, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		}
+		// prepare src image for blitting
+		{
+			VkImageSubresourceLayers range;
+			range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			range.mipLevel = 0;
+			range.baseArrayLayer = texViewVk->firstSlice;
+			range.layerCount = 1;
+			barrier_image<IMAGE_WRITE | TRANSFER_WRITE, SYNC_OP::TRANSFER_READ>(baseImageTex, range, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+		}
+
+		VkOffset3D blitSize{width, height, 1};
+		VkImageBlit imageBlitRegion{};
+		imageBlitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		imageBlitRegion.srcSubresource.mipLevel = 0;
+		imageBlitRegion.srcSubresource.baseArrayLayer = texViewVk->firstSlice;
+		imageBlitRegion.srcSubresource.layerCount = 1;
+		imageBlitRegion.srcOffsets[1] = blitSize;
+
+		imageBlitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		imageBlitRegion.dstSubresource.mipLevel = 0;
+		imageBlitRegion.dstSubresource.baseArrayLayer = 0;
+		imageBlitRegion.dstSubresource.layerCount = 1;
+		imageBlitRegion.dstOffsets[1] = blitSize;
+
+		vkCmdBlitImage(m_state.currentCommandBuffer, dumpImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &imageBlitRegion, VK_FILTER_NEAREST);
+
+		// dest image to general layout
+		{
+			VkImageSubresourceRange range;
+			range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			range.baseMipLevel = 0;
+			range.levelCount = 1;
+			range.baseArrayLayer = 0;
+			range.layerCount = 1;
+			barrier_image<TRANSFER_WRITE, TRANSFER_READ>(image, range, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+		}
+		// transition image back
+		{
+			VkImageSubresourceLayers range;
+			range.aspectMask = baseImageTex->GetImageAspect();
+			range.mipLevel = 0;
+			range.baseArrayLayer = texViewVk->firstSlice;
+			range.layerCount = 1;
+			barrier_image<TRANSFER_READ, TRANSFER_WRITE | IMAGE_WRITE>(baseImageTex, range, baseImageTex->GetDefaultLayout());
+		}
+
+		format = VK_FORMAT_R8G8B8A8_UNORM;
+		dumpImage = image;
+	}
+
+	uint32 size;
+	switch (format)
+	{
+	case VK_FORMAT_R8G8B8A8_UNORM:
+	case VK_FORMAT_R8G8B8A8_SRGB:
+		size = 4 * width * height;
+		break;
+	case VK_FORMAT_R8G8B8_UNORM:
+	case VK_FORMAT_R8G8B8_SRGB:
+		size = 3 * width * height;
+		break;
+	default:
+		size = 0;
+	}
+
+	if (size == 0)
+	{
+		cemu_assert_debug(false);
+		if (image)
+			vkDestroyImage(m_logicalDevice, image, nullptr);
+		if (imageMemory)
+			vkFreeMemory(m_logicalDevice, imageMemory, nullptr);
+		return false;
+	}
+
+	VkBufferImageCopy region{};
+	region.bufferOffset = 0;
+	region.bufferRowLength = width;
+	region.bufferImageHeight = height;
+
+	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.imageSubresource.baseArrayLayer = 0;
+	region.imageSubresource.layerCount = 1;
+	region.imageSubresource.mipLevel = 0;
+
+	region.imageOffset = { 0,0,0 };
+	region.imageExtent = { (uint32)width,(uint32)height,1 };
+
+	void* bufferPtr = nullptr;
+
+	VkBuffer buffer = nullptr;
+	VkDeviceMemory bufferMemory = nullptr;
+	memoryManager->CreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, buffer, bufferMemory);
+	vkMapMemory(m_logicalDevice, bufferMemory, 0, VK_WHOLE_SIZE, 0, &bufferPtr);
+
+	// if no blit was necessary a barrier still needs to be inserted and slice may not be zero
+	if (dumpImage == baseImage)
+	{
+		region.imageSubresource.baseArrayLayer = texViewVk->firstSlice;
+		barrier_image<IMAGE_WRITE | TRANSFER_WRITE, TRANSFER_READ>(baseImageTex, region.imageSubresource, VK_IMAGE_LAYOUT_GENERAL);
+	}
+
+	vkCmdCopyImageToBuffer(m_state.currentCommandBuffer, dumpImage, VK_IMAGE_LAYOUT_GENERAL, buffer, 1, &region);
+	if (dumpImage == baseImage)
+	{
+		barrier_image<TRANSFER_READ, TRANSFER_WRITE | IMAGE_WRITE>(baseImageTex, region.imageSubresource, baseImageTex->GetDefaultLayout());
+	}
+
+	SubmitCommandBuffer();
+	WaitCommandBufferFinished(GetCurrentCommandBufferId());
+
+	bool formatValid = true;
+
+	// AviWriter expects 32bpp top-down BGRA; fill directly instead of
+	// going through the RGB8 std::vector<uint8> that SaveScreenshot() wants.
+	outBGRA.resize(static_cast<size_t>(width) * height * 4);
+	uint8* dst = outBGRA.data();
+
+	switch (format)
+	{
+	case VK_FORMAT_R8G8B8A8_UNORM:
+		for (auto ptr = (uint8*)bufferPtr; ptr < (uint8*)bufferPtr + size; ptr += 4, dst += 4)
+		{
+			dst[0] = ptr[2]; // B
+			dst[1] = ptr[1]; // G
+			dst[2] = ptr[0]; // R
+			dst[3] = ptr[3]; // A
+		}
+		break;
+	case VK_FORMAT_R8G8B8A8_SRGB:
+		for (auto ptr = (uint8*)bufferPtr; ptr < (uint8*)bufferPtr + size; ptr += 4, dst += 4)
+		{
+			dst[0] = SRGBComponentToRGB(ptr[2]);
+			dst[1] = SRGBComponentToRGB(ptr[1]);
+			dst[2] = SRGBComponentToRGB(ptr[0]);
+			dst[3] = ptr[3];
+		}
+		break;
+	case VK_FORMAT_R8G8B8_UNORM:
+		for (auto ptr = (uint8*)bufferPtr; ptr < (uint8*)bufferPtr + size; ptr += 3, dst += 4)
+		{
+			dst[0] = ptr[2];
+			dst[1] = ptr[1];
+			dst[2] = ptr[0];
+			dst[3] = 255;
+		}
+		break;
+	case VK_FORMAT_R8G8B8_SRGB:
+		for (auto ptr = (uint8*)bufferPtr; ptr < (uint8*)bufferPtr + size; ptr += 3, dst += 4)
+		{
+			dst[0] = SRGBComponentToRGB(ptr[2]);
+			dst[1] = SRGBComponentToRGB(ptr[1]);
+			dst[2] = SRGBComponentToRGB(ptr[0]);
+			dst[3] = 255;
+		}
+		break;
+	default:
+		formatValid = false;
+		cemu_assert_debug(false);
+	}
+
+	vkUnmapMemory(m_logicalDevice, bufferMemory);
+	vkFreeMemory(m_logicalDevice, bufferMemory, nullptr);
+	vkDestroyBuffer(m_logicalDevice, buffer, nullptr);
+
+	if (image)
+		vkDestroyImage(m_logicalDevice, image, nullptr);
+	if (imageMemory)
+		vkFreeMemory(m_logicalDevice, imageMemory, nullptr);
+
+	if (!formatValid)
+		return false;
+
+	outWidth = static_cast<uint32>(width);
+	outHeight = static_cast<uint32>(height);
+	return true;
+}
+
 static const float kQueuePriority = 1.0f;
 
 std::vector<VkDeviceQueueCreateInfo> VulkanRenderer::CreateQueueCreateInfos(const std::set<sint32>& uniqueQueueFamilies) const
