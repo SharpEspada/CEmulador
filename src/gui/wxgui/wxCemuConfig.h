@@ -125,6 +125,7 @@ struct wxCemuConfig
 		sHotkeyCfg toggleFullscreenAlt;
 		sHotkeyCfg exitFullscreen;
 		sHotkeyCfg takeScreenshot;
+		sHotkeyCfg toggleFrameDump;
 		sHotkeyCfg toggleFastForward;
 		sHotkeyCfg exitApplication;
 #ifdef CEMU_DEBUG_ASSERT
