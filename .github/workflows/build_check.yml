@@ -1,0 +1,19 @@
+name: Build check
+on: 
+  workflow_dispatch: # lets you start a build by hand: Actions tab > Build check > Run workflow
+  pull_request:
+    paths-ignore:
+      - "*.md"
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    paths-ignore:
+      - "*.md"
+    branches:
+      - main
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml

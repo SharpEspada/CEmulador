@@ -1,0 +1,40 @@
+{
+	"name": "CEmulador build (Ubuntu 22.04, clang-15, vcpkg)",
+
+	// Même base OS que le CI officiel (.github/workflows/build.yml, job build-ubuntu)
+	// pour éviter les surprises liées à une distro différente.
+	"image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+
+	// vcpkg compile ses dépendances depuis les sources la première fois :
+	// c'est long et gourmand en RAM (des unités de compilation C++ lourdes,
+	// type Vulkan/wxWidgets). 4 coeurs / 16 Go est un minimum confortable ;
+	// si vous pouvez choisir une machine plus grosse au moment de créer le
+	// Codespace ("Create codespace" > "..." > choisir la taille de machine),
+	// prenez-la.
+	"hostRequirements": {
+		"cpus": 4,
+		"memory": "16gb",
+		"storage": "32gb"
+	},
+
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"GitHub.copilot",
+				"GitHub.copilot-chat",
+				"ms-vscode.cpptools",
+				"ms-vscode.cmake-tools",
+				"llvm-vs-code-extensions.vscode-clangd"
+			]
+		}
+	},
+
+	// S'exécute une seule fois à la création du Codespace : installe les
+	// paquets système exacts utilisés par le CI officiel, s'assure que le
+	// sous-module vcpkg est bien cloné, puis le bootstrap. Ça ne compile
+	// PAS encore Cemu lui-même (voir README_CODESPACE.md pour la suite),
+	// pour que vous puissiez lancer cette étape longue vous-même et suivre
+	// la progression dans le terminal plutôt que dans les logs de création
+	// du Codespace.
+	"postCreateCommand": "bash .devcontainer/setup.sh"
+}

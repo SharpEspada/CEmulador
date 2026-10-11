@@ -1,0 +1,763 @@
+#pragma once
+
+#include <util/helpers/MemoryPool.h>
+
+struct CHAddr
+{
+	uint32 offset;
+	uint32 chunkIndex;
+	void* internal; // AllocRange
+
+	CHAddr(uint32 _offset, uint32 _chunkIndex, void* internal = nullptr) : offset(_offset), chunkIndex(_chunkIndex), internal(internal) {};
+	CHAddr() : offset(0xFFFFFFFF), chunkIndex(0xFFFFFFFF) {};
+
+	bool isValid() { return chunkIndex != 0xFFFFFFFF; };
+	static CHAddr getInvalid() { return CHAddr(0xFFFFFFFF, 0xFFFFFFFF); };
+};
+
+template<uint32 TMinimumAlignment = 32>
+class ChunkedHeap
+{
+	struct AllocRange
+	{
+		AllocRange* nextFree{};
+		AllocRange* prevFree{};
+		AllocRange* prevOrdered{};
+		AllocRange* nextOrdered{};
+		uint32 offset;
+		uint32 chunkIndex;
+		uint32 size;
+		bool isFree;
+		AllocRange(uint32 _offset, uint32 _chunkIndex, uint32 _size, bool _isFree) : offset(_offset), chunkIndex(_chunkIndex), size(_size), isFree(_isFree), nextFree(nullptr) {};
+	};
+
+	struct Chunk
+	{
+		uint32 size;
+	};
+
+public:
+	ChunkedHeap()
+	{
+	}
+
+	CHAddr alloc(uint32 size, uint32 alignment = 4)
+	{
+		return _alloc(size, alignment);
+	}
+
+	void free(CHAddr addr)
+	{
+		_free(addr);
+	}
+
+	virtual uint32 allocateNewChunk(uint32 chunkIndex, uint32 minimumAllocationSize) = 0;
+
+private:
+	unsigned ulog2(uint32 v)
+	{
+		cemu_assert_debug(v != 0);
+		return 31 - std::countl_zero(v);
+	}
+
+	void trackFreeRange(AllocRange* range)
+	{
+		// get index of msb
+		cemu_assert_debug(range->size != 0); // size of zero is not allowed
+		uint32 bucketIndex = ulog2(range->size);
+		range->nextFree = m_bucketFreeRange[bucketIndex];
+		if (m_bucketFreeRange[bucketIndex])
+			m_bucketFreeRange[bucketIndex]->prevFree = range;
+		range->prevFree = nullptr;
+		m_bucketFreeRange[bucketIndex] = range;
+		m_bucketUseMask |= (1u << bucketIndex);
+	}
+
+	void forgetFreeRange(AllocRange* range, uint32 bucketIndex)
+	{
+		AllocRange* prevRange = range->prevFree;
+		AllocRange* nextRange = range->nextFree;
+		if (prevRange)
+		{
+			prevRange->nextFree = nextRange;
+			if (nextRange)
+				nextRange->prevFree = prevRange;
+		}
+		else
+		{
+			cemu_assert_debug(m_bucketFreeRange[bucketIndex] == range);
+			m_bucketFreeRange[bucketIndex] = nextRange;
+			if (nextRange)
+				nextRange->prevFree = nullptr;
+			else
+				m_bucketUseMask &= ~(1u << bucketIndex);
+		}
+	}
+
+	bool allocateChunk(uint32 minimumAllocationSize)
+	{
+		uint32 chunkIndex = (uint32)m_chunks.size();
+		m_chunks.emplace_back();
+		uint32 chunkSize = allocateNewChunk(chunkIndex, minimumAllocationSize);
+		cemu_assert_debug((chunkSize%TMinimumAlignment) == 0); // chunk size should be a multiple of the minimum alignment
+		if (chunkSize == 0)
+			return false;
+		cemu_assert_debug(chunkSize < 0x80000000u); // chunk size must be below 2GB
+		AllocRange* range = m_allocEntriesPool.allocObj(0, chunkIndex, chunkSize, true);
+		trackFreeRange(range);
+		m_numHeapBytes += chunkSize;
+		return true;
+	}
+
+	void _allocFrom(AllocRange* range, uint32 bucketIndex, uint32 allocOffset, uint32 allocSize)
+	{
+		cemu_assert_debug(allocSize > 0);
+		// remove the range from the chain of free ranges
+		forgetFreeRange(range, bucketIndex);
+		// split head, allocation and tail into separate ranges
+		uint32 headBytes = allocOffset - range->offset;
+		if (headBytes > 0)
+		{
+			// alignment padding -> create free range
+			cemu_assert_debug(headBytes >= TMinimumAlignment);
+			AllocRange* head = m_allocEntriesPool.allocObj(range->offset, range->chunkIndex, headBytes, true);
+			trackFreeRange(head);
+			if (range->prevOrdered)
+				range->prevOrdered->nextOrdered = head;
+			head->prevOrdered = range->prevOrdered;
+			head->nextOrdered = range;
+			range->prevOrdered = head;
+		}
+		uint32 tailBytes = (range->offset + range->size) - (allocOffset + allocSize);
+		if (tailBytes > 0)
+		{
+			// tail -> create free range
+			cemu_assert_debug(tailBytes >= TMinimumAlignment);
+			AllocRange* tail = m_allocEntriesPool.allocObj((allocOffset + allocSize), range->chunkIndex, tailBytes, true);
+			trackFreeRange(tail);
+			if (range->nextOrdered)
+				range->nextOrdered->prevOrdered = tail;
+			tail->prevOrdered = range;
+			tail->nextOrdered = range->nextOrdered;
+			range->nextOrdered = tail;
+		}
+		range->offset = allocOffset;
+		range->size = allocSize;
+		range->isFree = false;
+	}
+
+	CHAddr _alloc(uint32 size, uint32 alignment)
+	{
+		cemu_assert_debug(size <= (0x7FFFFFFFu-TMinimumAlignment));
+		// make sure size is not zero and align it
+		if(size == 0) [[unlikely]]
+			size = TMinimumAlignment;
+		else
+			size = (size + (TMinimumAlignment - 1)) & ~(TMinimumAlignment - 1);
+		// find smallest bucket to scan
+		uint32 alignmentM1 = alignment - 1;
+		uint32 bucketIndex = ulog2(size);
+		// check if the bucket is available
+		if( !(m_bucketUseMask & (1u << bucketIndex)) )
+		{
+			// skip to next non-empty bucket
+			uint32 nextIndex = BSF(m_bucketUseMask>>bucketIndex);
+			bucketIndex += nextIndex;
+		}
+		while (bucketIndex < 31)
+		{
+			AllocRange* range = m_bucketFreeRange[bucketIndex];
+			while (range)
+			{
+				if (range->size >= size)
+				{
+					// verify if aligned allocation fits
+					uint32 alignedOffset = (range->offset + alignmentM1) & ~alignmentM1;
+					uint32 endOffset = alignedOffset + size;
+					if((range->offset+range->size) >= endOffset)
+					{
+						_allocFrom(range, bucketIndex, alignedOffset, size);
+						m_numAllocatedBytes += size;
+						return CHAddr(alignedOffset, range->chunkIndex, range);
+					}
+				}
+				range = range->nextFree;
+			}
+			// check next non-empty bucket or skip to end
+			bucketIndex++;
+			uint32 emptyBuckets = BSF(m_bucketUseMask>>bucketIndex);
+			bucketIndex += emptyBuckets;
+		}
+		if(m_allocationLimitReached)
+			return CHAddr(0xFFFFFFFF, 0xFFFFFFFF);
+		if (!allocateChunk(size))
+		{
+			m_allocationLimitReached = true;
+			return CHAddr(0xFFFFFFFF, 0xFFFFFFFF);
+		}
+		return _alloc(size, alignment);
+	}
+
+	void _free(CHAddr addr)
+	{
+		if(!addr.internal)
+		{
+			cemuLog_log(LogType::Force, "Internal heap error. {:08x} {:08x}", addr.chunkIndex, addr.offset);
+			return;
+		}
+		AllocRange* range = (AllocRange*)addr.internal;
+		m_numAllocatedBytes -= range->size;
+		// try merge left or right
+		AllocRange* prevRange = range->prevOrdered;
+		AllocRange* nextRange = range->nextOrdered;
+		if (prevRange && prevRange->isFree)
+		{
+			if (nextRange && nextRange->isFree)
+			{
+				forgetFreeRange(nextRange, ulog2(nextRange->size));
+				uint32 newSize = (nextRange->offset + nextRange->size) - prevRange->offset;
+				prevRange->nextOrdered = nextRange->nextOrdered;
+				if (nextRange->nextOrdered)
+					nextRange->nextOrdered->prevOrdered = prevRange;
+				forgetFreeRange(prevRange, ulog2(prevRange->size));
+				prevRange->size = newSize;
+				trackFreeRange(prevRange);
+				m_allocEntriesPool.freeObj(range);
+				m_allocEntriesPool.freeObj(nextRange);
+			}
+			else
+			{
+				uint32 newSize = (range->offset + range->size) - prevRange->offset;
+				prevRange->nextOrdered = nextRange;
+				if (nextRange)
+					nextRange->prevOrdered = prevRange;
+				forgetFreeRange(prevRange, ulog2(prevRange->size));
+				prevRange->size = newSize;
+				trackFreeRange(prevRange);
+				m_allocEntriesPool.freeObj(range);
+			}
+		}
+		else if (nextRange && nextRange->isFree)
+		{
+			uint32 newOffset = range->offset;
+			uint32 newSize = (nextRange->offset + nextRange->size) - newOffset;
+			forgetFreeRange(nextRange, ulog2(nextRange->size));
+			nextRange->offset = newOffset;
+			nextRange->size = newSize;
+			if (range->prevOrdered)
+				range->prevOrdered->nextOrdered = nextRange;
+			nextRange->prevOrdered = range->prevOrdered;
+			trackFreeRange(nextRange);
+			m_allocEntriesPool.freeObj(range);
+		}
+		else
+		{
+			range->isFree = true;
+			trackFreeRange(range);
+		}
+	}
+
+	void verifyHeap()
+	{
+		// check for collisions within bucketFreeRange
+		struct availableRange_t
+		{
+			uint32 chunkIndex;
+			uint32 offset;
+			uint32 size;
+		};
+
+		std::vector<availableRange_t> availRanges;
+
+		for (uint32 i = 0; i < 32; i++)
+		{
+			AllocRange* ar = m_bucketFreeRange[i];
+			while (ar)
+			{
+				availableRange_t dbgRange;
+				dbgRange.chunkIndex = ar->chunkIndex;
+				dbgRange.offset = ar->offset;
+				dbgRange.size = ar->size;
+
+				for (auto& itr : availRanges)
+				{
+					if (itr.chunkIndex != dbgRange.chunkIndex)
+						continue;
+					if (itr.offset < (dbgRange.offset + dbgRange.size) && (itr.offset + itr.size) > dbgRange.offset)
+						cemu_assert_error();
+				}
+
+				availRanges.emplace_back(dbgRange);
+
+				ar = ar->nextFree;
+			}
+		}
+
+	}
+
+private:
+	std::vector<Chunk> m_chunks;
+	uint32 m_bucketUseMask{0x80000000}; // bitmask indicating non-empty buckets. MSB always set to provide an upper bound for BSF instruction
+	AllocRange* m_bucketFreeRange[32]{}; // we are only using 31 entries since the MSB is reserved (thus chunks equal or larger than 2^31 are not allowed)
+	bool m_allocationLimitReached = false;
+	MemoryPool<AllocRange> m_allocEntriesPool{64};
+
+public:
+	// statistics
+	uint32 m_numHeapBytes{}; // total size of the heap
+	uint32 m_numAllocatedBytes{};
+};
+
+class VGenericHeap
+{
+public:
+	virtual void* alloc(uint32 size, uint32 alignment) = 0;
+	virtual void free(void* addr) = 0;
+};
+
+class VHeap : public VGenericHeap
+{
+	struct allocRange_t
+	{
+		allocRange_t* nextFree{};
+		allocRange_t* prevFree{};
+		allocRange_t* prevOrdered{};
+		allocRange_t* nextOrdered{};
+		uint32 offset;
+		uint32 size;
+		bool isFree;
+		allocRange_t(uint32 _offset, uint32 _size, bool _isFree) : offset(_offset), size(_size), isFree(_isFree), nextFree(nullptr) {};
+	};
+
+	struct chunk_t
+	{
+		std::unordered_map<uint32, allocRange_t*> map_allocatedRange;
+	};
+
+public:
+	VHeap(void* heapBase, uint32 heapSize) : m_heapBase((uint8*)heapBase), m_heapSize(heapSize)
+	{
+		allocRange_t* range = new allocRange_t(0, heapSize, true);
+		trackFreeRange(range);
+	}
+
+	~VHeap()
+	{
+		for (auto freeRange : bucketFreeRange)
+		{
+			while (freeRange)
+			{
+				auto temp = freeRange;
+				freeRange = freeRange->nextFree;
+				delete temp;
+			}
+		}
+	}
+
+	void setHeapBase(void* heapBase)
+	{
+		cemu_assert_debug(map_allocatedRange.empty()); // heap base can only be changed when there are no active allocations
+		m_heapBase = (uint8*)heapBase;
+	}
+
+	void* alloc(uint32 size, uint32 alignment = 4) override
+	{
+		cemu_assert_debug(m_heapBase != nullptr); // if this is null, we cant use alloc() == nullptr to determine if an allocation failed
+		uint32 allocOffset = 0;
+		bool r = _alloc(size, alignment, allocOffset);
+		if (!r)
+			return nullptr;
+		return m_heapBase + allocOffset;
+	}
+
+	void free(void* addr) override
+	{
+		_free((uint32)((uint8*)addr - (uint8*)m_heapBase));
+	}
+
+	bool allocOffset(uint32 size, uint32 alignment, uint32& offsetOut)
+	{
+		uint32 allocOffset = 0;
+		bool r = _alloc(size, alignment, allocOffset);
+		if (!r)
+			return false;
+		offsetOut = allocOffset;
+		return true;
+	}
+
+	void freeOffset(uint32 offset)
+	{
+		_free((uint32)offset);
+	}
+
+	uint32 getAllocationSizeFromAddr(void* addr)
+	{
+		uint32 addrOffset = (uint32)((uint8*)addr - m_heapBase);
+		auto it = map_allocatedRange.find(addrOffset);
+		if (it == map_allocatedRange.end())
+			assert_dbg();
+		return it->second->size;
+	}
+
+	bool hasAllocations()
+	{
+		return !map_allocatedRange.empty();
+	}
+
+	void getStats(uint32& heapSize, uint32& allocationSize, uint32& allocNum)
+	{
+		heapSize = m_heapSize;
+		allocationSize = m_statsMemAllocated;
+		allocNum = (uint32)map_allocatedRange.size();
+	}
+
+	// --- Savestate support -------------------------------------------------
+	// See /Cafe/Savestate/PATCH_ChunkedHeap.h.txt for the full design
+	// rationale. Added to support CEmulador's savestate feature.
+
+	std::vector<std::pair<uint32, uint32>> GetAllocatedRangesForSavestate() const
+	{
+		std::vector<std::pair<uint32, uint32>> result;
+		result.reserve(map_allocatedRange.size());
+		for (auto& [offset, range] : map_allocatedRange)
+			result.emplace_back(offset, range->size);
+		return result;
+	}
+
+	// Tears down every range (allocated and free) and recreates a
+	// single free range spanning the whole heap - identical state to
+	// right after the constructor.
+	void ResetForSavestate()
+	{
+		for (auto& [offset, range] : map_allocatedRange)
+			delete range;
+		map_allocatedRange.clear();
+		for (uint32 i = 0; i < 32; i++)
+		{
+			allocRange_t* freeRange = bucketFreeRange[i];
+			while (freeRange)
+			{
+				allocRange_t* next = freeRange->nextFree;
+				delete freeRange;
+				freeRange = next;
+			}
+			bucketFreeRange[i] = nullptr;
+		}
+		m_statsMemAllocated = 0;
+		allocRange_t* range = new allocRange_t(0, m_heapSize, true);
+		trackFreeRange(range);
+	}
+
+	// Rebuilds this heap's allocator bookkeeping so that exactly the
+	// given (offset, size) pairs are allocated, with everything else
+	// free. Reuses _allocFrom() (the same function the live allocator
+	// uses) so prevOrdered/nextOrdered chaining, bucket tracking, and
+	// stats stay consistent with normal operation.
+	void RestoreAllocatedRangesFromSavestate(const std::vector<std::pair<uint32, uint32>>& ranges)
+	{
+		ResetForSavestate();
+
+		std::vector<std::pair<uint32, uint32>> sorted = ranges;
+		std::sort(sorted.begin(), sorted.end());
+
+		for (auto& [offset, size] : sorted)
+		{
+			cemu_assert_debug(size > 0 && (uint64)offset + (uint64)size <= (uint64)m_heapSize);
+			uint32 bucketIndex;
+			allocRange_t* range = findFreeRangeContainingForSavestate(offset, size, bucketIndex);
+			if (!range)
+			{
+				cemuLog_log(LogType::Force, "VHeap: cannot restore allocation at {:08x} size {:08x} from savestate", offset, size);
+				continue;
+			}
+			_allocFrom(range, bucketIndex, offset, size);
+			map_allocatedRange.emplace(offset, range);
+		}
+	}
+
+private:
+	// Linear scan is fine: only called while restoring a savestate,
+	// never on a hot path, and at most 1-2 free ranges exist in
+	// practice at any point during the restore loop above.
+	allocRange_t* findFreeRangeContainingForSavestate(uint32 targetOffset, uint32 targetSize, uint32& outBucketIndex)
+	{
+		for (uint32 i = 0; i < 32; i++)
+		{
+			allocRange_t* range = bucketFreeRange[i];
+			while (range)
+			{
+				if (range->offset <= targetOffset && (range->offset + range->size) >= (targetOffset + targetSize))
+				{
+					outBucketIndex = i;
+					return range;
+				}
+				range = range->nextFree;
+			}
+		}
+		return nullptr;
+	}
+
+private:
+	unsigned ulog2(uint32 v)
+	{
+		static const unsigned MUL_DE_BRUIJN_BIT[] =
+		{
+		   0,  9,  1, 10, 13, 21,  2, 29, 11, 14, 16, 18, 22, 25,  3, 30,
+		   8, 12, 20, 28, 15, 17, 24,  7, 19, 27, 23,  6, 26,  5,  4, 31
+		};
+
+		v |= v >> 1;
+		v |= v >> 2;
+		v |= v >> 4;
+		v |= v >> 8;
+		v |= v >> 16;
+
+		return MUL_DE_BRUIJN_BIT[(v * 0x07C4ACDDu) >> 27];
+	}
+
+	void trackFreeRange(allocRange_t* range)
+	{
+		// get index of msb
+		if (range->size == 0)
+			assert_dbg(); // not allowed
+		uint32 bucketIndex = ulog2(range->size);
+		range->nextFree = bucketFreeRange[bucketIndex];
+		if (bucketFreeRange[bucketIndex])
+			bucketFreeRange[bucketIndex]->prevFree = range;
+		range->prevFree = nullptr;
+		bucketFreeRange[bucketIndex] = range;
+	}
+
+	void forgetFreeRange(allocRange_t* range, uint32 bucketIndex)
+	{
+		allocRange_t* prevRange = range->prevFree;
+		allocRange_t* nextRange = range->nextFree;
+		if (prevRange)
+		{
+			prevRange->nextFree = nextRange;
+			if (nextRange)
+				nextRange->prevFree = prevRange;
+		}
+		else
+		{
+			if (bucketFreeRange[bucketIndex] != range)
+				assert_dbg();
+			bucketFreeRange[bucketIndex] = nextRange;
+			if (nextRange)
+				nextRange->prevFree = nullptr;
+		}
+	}
+
+	void _allocFrom(allocRange_t* range, uint32 bucketIndex, uint32 allocOffset, uint32 allocSize)
+	{
+		// remove the range from the chain of free ranges
+		forgetFreeRange(range, bucketIndex);
+		// split head, allocation and tail into separate ranges
+		if (allocOffset > range->offset)
+		{
+			// alignment padding -> create free range
+			allocRange_t* head = new allocRange_t(range->offset, allocOffset - range->offset, true);
+			trackFreeRange(head);
+			if (range->prevOrdered)
+				range->prevOrdered->nextOrdered = head;
+			head->prevOrdered = range->prevOrdered;
+			head->nextOrdered = range;
+			range->prevOrdered = head;
+		}
+		if ((allocOffset + allocSize) < (range->offset + range->size)) // todo - create only if it's more than a couple of bytes?
+		{
+			// tail -> create free range
+			allocRange_t* tail = new allocRange_t((allocOffset + allocSize), (range->offset + range->size) - (allocOffset + allocSize), true);
+			trackFreeRange(tail);
+			if (range->nextOrdered)
+				range->nextOrdered->prevOrdered = tail;
+			tail->prevOrdered = range;
+			tail->nextOrdered = range->nextOrdered;
+			range->nextOrdered = tail;
+		}
+		range->offset = allocOffset;
+		range->size = allocSize;
+		range->isFree = false;
+		m_statsMemAllocated += allocSize;
+	}
+
+	bool _alloc(uint32 size, uint32 alignment, uint32& allocOffsetOut)
+	{
+		if(size == 0)
+		{
+			size = 1; // zero-sized allocations are not supported
+			cemu_assert_suspicious();
+		}
+		// find smallest bucket to scan
+		uint32 alignmentM1 = alignment - 1;
+		uint32 bucketIndex = ulog2(size);
+		while (bucketIndex < 32)
+		{
+			allocRange_t* range = bucketFreeRange[bucketIndex];
+			while (range)
+			{
+				if (range->size >= size)
+				{
+					// verify if aligned allocation fits
+					uint32 alignedOffset = (range->offset + alignmentM1) & ~alignmentM1;
+					uint32 alignmentLoss = alignedOffset - range->offset;
+					if (alignmentLoss < range->size && (range->size - alignmentLoss) >= size)
+					{
+						_allocFrom(range, bucketIndex, alignedOffset, size);
+						map_allocatedRange.emplace(alignedOffset, range);
+						allocOffsetOut = alignedOffset;
+						return true;
+					}
+				}
+				range = range->nextFree;
+			}
+			bucketIndex++; // try higher bucket
+		}
+		return false;
+	}
+
+	void _free(uint32 addrOffset)
+	{
+		auto it = map_allocatedRange.find(addrOffset);
+		if (it == map_allocatedRange.end())
+		{
+			cemuLog_log(LogType::Force, "VHeap internal error");
+			cemu_assert(false);
+		}
+		allocRange_t* range = it->second;
+		map_allocatedRange.erase(it);
+		m_statsMemAllocated -= range->size;
+		// try merge left or right
+		allocRange_t* prevRange = range->prevOrdered;
+		allocRange_t* nextRange = range->nextOrdered;
+		if (prevRange && prevRange->isFree)
+		{
+			if (nextRange && nextRange->isFree)
+			{
+				forgetFreeRange(nextRange, ulog2(nextRange->size));
+				uint32 newSize = (nextRange->offset + nextRange->size) - prevRange->offset;
+				prevRange->nextOrdered = nextRange->nextOrdered;
+				if (nextRange->nextOrdered)
+					nextRange->nextOrdered->prevOrdered = prevRange;
+				forgetFreeRange(prevRange, ulog2(prevRange->size));
+				prevRange->size = newSize;
+				trackFreeRange(prevRange);
+				delete range;
+				delete nextRange;
+			}
+			else
+			{
+				uint32 newSize = (range->offset + range->size) - prevRange->offset;
+				prevRange->nextOrdered = nextRange;
+				if (nextRange)
+					nextRange->prevOrdered = prevRange;
+				forgetFreeRange(prevRange, ulog2(prevRange->size));
+				prevRange->size = newSize;
+				trackFreeRange(prevRange);
+				delete range;
+			}
+		}
+		else if (nextRange && nextRange->isFree)
+		{
+			uint32 newOffset = range->offset;
+			uint32 newSize = (nextRange->offset + nextRange->size) - newOffset;
+			forgetFreeRange(nextRange, ulog2(nextRange->size));
+			nextRange->offset = newOffset;
+			nextRange->size = newSize;
+			if (range->prevOrdered)
+				range->prevOrdered->nextOrdered = nextRange;
+			nextRange->prevOrdered = range->prevOrdered;
+			trackFreeRange(nextRange);
+			delete range;
+		}
+		else
+		{
+			range->isFree = true;
+			trackFreeRange(range);
+		}
+	}
+
+private:
+	allocRange_t* bucketFreeRange[32]{};
+	std::unordered_map<uint32, allocRange_t*> map_allocatedRange;
+	uint8* m_heapBase;
+	const uint32 m_heapSize;
+	uint32 m_statsMemAllocated{ 0 };
+};
+
+template<uint32 TChunkSize>
+class ChunkedFlatAllocator
+{
+public:
+	void setBaseAllocator(VGenericHeap* baseHeap)
+	{
+		m_currentBaseAllocator = baseHeap;
+	}
+
+	void* alloc(uint32 size, uint32 alignment = 4)
+	{
+		if (m_currentBlockPtr)
+		{
+			m_currentBlockOffset = (m_currentBlockOffset + alignment - 1) & ~(alignment - 1);
+			if ((m_currentBlockOffset+size) <= TChunkSize)
+			{
+				void* allocPtr = m_currentBlockPtr + m_currentBlockOffset;
+				m_currentBlockOffset += size;
+				return allocPtr;
+			}
+		}
+		allocateAdditionalChunk();
+		return alloc(size, alignment);
+	}
+
+	void releaseAll()
+	{
+		for (auto it : m_allocatedBlocks)
+			m_currentBaseAllocator->free(it);
+		m_allocatedBlocks.clear();
+		m_currentBlockPtr = nullptr;
+		m_currentBlockOffset = 0;
+	}
+
+	void forEachBlock(void(*funcCb)(void* mem, uint32 size))
+	{
+		for (auto it : m_allocatedBlocks)
+			funcCb(it, TChunkSize);
+	}
+
+	uint32 getCurrentBlockOffset() const { return m_currentBlockOffset; }
+	uint8* getCurrentBlockPtr() const { return m_currentBlockPtr; }
+
+	// --- Savestate support -------------------------------------------------
+	// Added to support CEmulador's savestate feature. The base heap
+	// (m_currentBaseAllocator) must already have these exact block
+	// addresses marked allocated via its own
+	// RestoreAllocatedRangesFromSavestate() before this is called.
+
+	const std::vector<void*>& GetAllocatedBlocksForSavestate() const
+	{
+		return m_allocatedBlocks;
+	}
+
+	// `blocks` must be in original allocation order (oldest first) -
+	// exactly how GetAllocatedBlocksForSavestate() returns them.
+	void RestoreForSavestate(const std::vector<void*>& blocks, uint32 currentBlockOffset)
+	{
+		m_allocatedBlocks = blocks;
+		m_currentBlockPtr = blocks.empty() ? nullptr : (uint8*)blocks.back();
+		m_currentBlockOffset = currentBlockOffset;
+	}
+
+private:
+	void allocateAdditionalChunk()
+	{
+		m_currentBlockPtr = (uint8*)m_currentBaseAllocator->alloc(TChunkSize, 256);
+		m_currentBlockOffset = 0;
+		m_allocatedBlocks.emplace_back(m_currentBlockPtr);
+	}
+
+	VGenericHeap* m_currentBaseAllocator{};
+	uint8* m_currentBlockPtr{};
+	uint32 m_currentBlockOffset{};
+	std::vector<void*> m_allocatedBlocks;
+};
