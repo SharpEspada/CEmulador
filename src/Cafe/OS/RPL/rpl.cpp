@@ -2606,3 +2606,8 @@ void RPLLoader_UnloadAll()
 	rplLoader_sdata2Addr = MPTR_NULL;
 	rplLoader_mainModule = nullptr;
 }
+
+// Acces aux heaps du loader pour les savestates (SavestateSerializer_RPL.cpp).
+VHeap& RPLLoader_Savestate_GetHeapWorkarea() { return rplLoaderHeap_workarea; }
+VHeap& RPLLoader_Savestate_GetHeapLowerAreaCodeMem2() { return rplLoaderHeap_lowerAreaCodeMem2; }
+VHeap& RPLLoader_Savestate_GetHeapCodeArea2() { return rplLoaderHeap_codeArea2; }
