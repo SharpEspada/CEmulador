@@ -23,7 +23,7 @@ namespace SavestateSerializer_GPU
 
 		// Rebased relative to timer_bootUp rather than stored absolute -
 		// see DoState() below for why.
-		int64 vsyncDeltaFromBootUp;
+		sint64 vsyncDeltaFromBootUp;
 
 		MPTR sharedAreaAddr; // sharedArea* pointer recomputed from this, never stored raw
 		uint32 gx2InitCalled;
@@ -123,7 +123,7 @@ namespace SavestateSerializer_GPU
 			// this same delta back - never carry the absolute HPC
 			// value across a save/load boundary, it means nothing on
 			// a different run (or different machine).
-			record.vsyncDeltaFromBootUp = (int64)(LatteGPUState.timer_nextVSync - LatteGPUState.timer_bootUp);
+			record.vsyncDeltaFromBootUp = (sint64)(LatteGPUState.timer_nextVSync - LatteGPUState.timer_bootUp);
 
 			record.sharedAreaAddr = LatteGPUState.sharedAreaAddr;
 			record.gx2InitCalled = LatteGPUState.gx2InitCalled;

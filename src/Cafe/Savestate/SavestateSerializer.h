@@ -31,6 +31,24 @@ enum class SerializerMode
 	Read,		// reads from m_buffer at m_pos
 };
 
+// Thrown when DoMarker() detects the read stream has desynced from
+// what the writer produced - almost always means a DoState() function
+// was changed on one side without a matching format version bump, or
+// a field was added/removed/reordered inconsistently.
+class SavestateDesyncException : public std::exception
+{
+public:
+	SavestateDesyncException(const char* expectedMarker, const char* actualMarker)
+	{
+		m_message = fmt::format("Savestate desync at marker '{}' (found '{}' instead). "
+			"The savestate format or a DoState() implementation is out of sync.",
+			expectedMarker, actualMarker);
+	}
+	const char* what() const noexcept override { return m_message.c_str(); }
+private:
+	std::string m_message;
+};
+
 class Serializer
 {
 public:
@@ -196,23 +214,6 @@ private:
 	size_t m_size = 0; // only meaningful in Measure mode
 };
 
-// Thrown when DoMarker() detects the read stream has desynced from
-// what the writer produced - almost always means a DoState() function
-// was changed on one side without a matching format version bump, or
-// a field was added/removed/reordered inconsistently.
-class SavestateDesyncException : public std::exception
-{
-public:
-	SavestateDesyncException(const char* expectedMarker, const char* actualMarker)
-	{
-		m_message = fmt::format("Savestate desync at marker '{}' (found '{}' instead). "
-			"The savestate format or a DoState() implementation is out of sync.",
-			expectedMarker, actualMarker);
-	}
-	const char* what() const noexcept override { return m_message.c_str(); }
-private:
-	std::string m_message;
-};
 
 // Helper: runs a DoState-style function twice (measure, then write)
 // into a freshly allocated buffer. Returns the buffer plus its size.

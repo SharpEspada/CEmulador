@@ -46,6 +46,17 @@
 
 // defined in rpl.cpp (external linkage)
 extern ChunkedFlatAllocator<64 * 1024> g_heapTrampolineArea;
+extern bool rplLoader_applicationHasMemoryControl;
+extern uint32 rplLoader_maxCodeAddress;
+extern uint32 rplLoader_currentTLSModuleIndex;
+extern uint32 rplLoader_currentHandleCounter;
+extern uint32 rplLoader_sdataAddr;
+extern uint32 rplLoader_sdata2Addr;
+extern uint32 rplLoader_currentDataAllocatorAddr;
+extern RPLModule* rplLoader_mainModule;
+extern VHeap rplLoaderHeap_workarea;
+extern VHeap rplLoaderHeap_lowerAreaCodeMem2; // defini comme PPCCodeHeap dans rpl.cpp (derive de VHeap)
+extern VHeap rplLoaderHeap_codeArea2;         // idem
 
 namespace SavestateSerializer_RPL
 {

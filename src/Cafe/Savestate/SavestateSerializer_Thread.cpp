@@ -1,6 +1,5 @@
 #include "Cafe/Savestate/SavestateSerializer_Thread.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
-#include "Cafe/OS/libs/coreinit/coreinit_ThreadQueue.h"
 #include "Cafe/HW/MMU/MMU.h"
 
 // Requires PATCH_coreinit_Thread.txt applied.

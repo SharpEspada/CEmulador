@@ -9,7 +9,9 @@
 #include "Cafe/Savestate/SavestateSerializer_GPU.h"
 #include "Cafe/Savestate/SavestateSerializer_IOSU.h"
 #include "Cafe/Savestate/SavestateSlots.h"
+#include "Cafe/Savestate/SavestateFile.h"
 #include "Cafe/CafeSystem.h"
+#include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 #include "config/ActiveSettings.h"
 #include "Cafe/HW/Latte/Core/Latte.h" // Latte_Stop/Latte_GetStopSignal
 

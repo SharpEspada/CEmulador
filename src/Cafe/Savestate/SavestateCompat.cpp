@@ -57,7 +57,7 @@ uint64 SavestateCompat_ComputeCurrentHash()
 	// produce the same RAM mapping footprint while still changing
 	// emulated behavior in other ways (shader patches, etc.).
 
-	uint32 lo = crc32(0, (const uint8*)compatString.data(), (uint32)compatString.size());
-	uint32 hi = crc32(0x9E3779B9u, (const uint8*)compatString.data(), (uint32)compatString.size());
+	uint32 lo = crc32_calc(0, (const uint8*)compatString.data(), (uint32)compatString.size());
+	uint32 hi = crc32_calc(0x9E3779B9u, (const uint8*)compatString.data(), (uint32)compatString.size());
 	return ((uint64)hi << 32) | (uint64)lo;
 }

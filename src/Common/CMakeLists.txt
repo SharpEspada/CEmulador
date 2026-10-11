@@ -46,7 +46,7 @@ PRIVATE
 )
 endif()
 
-if(LINUX)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	target_sources(CemuCommon PRIVATE
 		ExceptionHandler/ELFSymbolTable.cpp
 		ExceptionHandler/ELFSymbolTable.h

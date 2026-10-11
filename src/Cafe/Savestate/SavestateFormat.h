@@ -75,7 +75,7 @@ struct SavestateFileHeader
 	uint64 thumbnailOffset;
 	uint32 thumbnailSize;
 
-	uint8 reserved[128]; // room to extend the header without another format bump
+	uint8 reserved[126]; // room to extend the header without another format bump
 };
 
 struct SavestateSectionTableEntry
