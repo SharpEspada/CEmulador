@@ -187,6 +187,7 @@ jobs:
       run: Rename-Item bin/Cemu_release.exe Cemu.exe
 
     - name: Build NSIS Installer
+      continue-on-error: true
       shell: cmd
       run: |
         cd src\resource
