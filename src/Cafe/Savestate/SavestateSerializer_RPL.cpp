@@ -46,6 +46,17 @@
 
 // defined in rpl.cpp (external linkage)
 extern ChunkedFlatAllocator<64 * 1024> g_heapTrampolineArea;
+extern bool rplLoader_applicationHasMemoryControl;
+extern uint32 rplLoader_maxCodeAddress;
+extern uint32 rplLoader_currentTLSModuleIndex;
+extern uint32 rplLoader_currentHandleCounter;
+extern RPLModule* rplLoader_mainModule;
+extern uint32 rplLoader_sdataAddr;
+extern uint32 rplLoader_sdata2Addr;
+extern uint32 rplLoader_currentDataAllocatorAddr;
+// the three heaps use a class local to rpl.cpp, so they are reached through an accessor
+// (0 = workarea, 1 = lowerAreaCodeMem2, 2 = codeArea2)
+VHeap& RPLLoader_GetHeapForSavestate(sint32 index);
 
 namespace SavestateSerializer_RPL
 {
@@ -278,9 +289,9 @@ namespace SavestateSerializer_RPL
 
 		// Allocator bookkeeping for the three fixed heaps. Names match
 		// the globals declared at the top of rpl.cpp.
-		DoStateHeapAllocations(s, rplLoaderHeap_workarea);
-		DoStateHeapAllocations(s, rplLoaderHeap_lowerAreaCodeMem2);
-		DoStateHeapAllocations(s, rplLoaderHeap_codeArea2);
+		DoStateHeapAllocations(s, RPLLoader_GetHeapForSavestate(0));
+		DoStateHeapAllocations(s, RPLLoader_GetHeapForSavestate(1));
+		DoStateHeapAllocations(s, RPLLoader_GetHeapForSavestate(2));
 	}
 
 	void DoState_Load(Serializer& s)
@@ -442,9 +453,9 @@ namespace SavestateSerializer_RPL
 		// happened under - and reproduces identical addresses
 		// deterministically (same load order, same file sizes => same
 		// first-fit allocation result).
-		rplLoaderHeap_workarea.ResetForSavestate();
-		rplLoaderHeap_lowerAreaCodeMem2.ResetForSavestate();
-		rplLoaderHeap_codeArea2.ResetForSavestate();
+		RPLLoader_GetHeapForSavestate(0).ResetForSavestate();
+		RPLLoader_GetHeapForSavestate(1).ResetForSavestate();
+		RPLLoader_GetHeapForSavestate(2).ResetForSavestate();
 
 		if (!modulesAlreadyMatch)
 		{
@@ -537,9 +548,9 @@ namespace SavestateSerializer_RPL
 		// exact saved allocation list (step 3c already confirmed the
 		// actual addresses match, so this is authoritative bookkeeping
 		// cleanup/confirmation, not a source of new addresses).
-		DoStateHeapAllocations(s, rplLoaderHeap_workarea);
-		DoStateHeapAllocations(s, rplLoaderHeap_lowerAreaCodeMem2);
-		DoStateHeapAllocations(s, rplLoaderHeap_codeArea2);
+		DoStateHeapAllocations(s, RPLLoader_GetHeapForSavestate(0));
+		DoStateHeapAllocations(s, RPLLoader_GetHeapForSavestate(1));
+		DoStateHeapAllocations(s, RPLLoader_GetHeapForSavestate(2));
 
 		// Step 4b: restore the global trampoline allocator (its blocks are
 		// entries of rplLoaderHeap_lowerAreaCodeMem2, restored just above)
