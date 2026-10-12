@@ -40,6 +40,15 @@ PPCCodeHeap rplLoaderHeap_codeArea2(nullptr, MEMORY_CODEAREA_SIZE);
 
 ChunkedFlatAllocator<64 * 1024> g_heapTrampolineArea;
 
+VHeap& RPLLoader_GetHeapForSavestate(sint32 index)
+{
+	if (index == 0)
+		return rplLoaderHeap_workarea;
+	if (index == 1)
+		return rplLoaderHeap_lowerAreaCodeMem2;
+	return rplLoaderHeap_codeArea2;
+}
+
 std::vector<RPLDependency*> s_rplDependencyList;
 std::vector<RPLModule*> s_rplModuleList;
 
@@ -2606,8 +2615,3 @@ void RPLLoader_UnloadAll()
 	rplLoader_sdata2Addr = MPTR_NULL;
 	rplLoader_mainModule = nullptr;
 }
-
-// Acces aux heaps du loader pour les savestates (SavestateSerializer_RPL.cpp).
-VHeap& RPLLoader_Savestate_GetHeapWorkarea() { return rplLoaderHeap_workarea; }
-VHeap& RPLLoader_Savestate_GetHeapLowerAreaCodeMem2() { return rplLoaderHeap_lowerAreaCodeMem2; }
-VHeap& RPLLoader_Savestate_GetHeapCodeArea2() { return rplLoaderHeap_codeArea2; }
