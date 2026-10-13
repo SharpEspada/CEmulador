@@ -17,7 +17,7 @@
 
 // bump this any time SavestateFormat.h or any DoState() layout changes
 // in a way that is not backwards compatible
-#define SAVESTATE_COMPAT_BREAK_VERSION 3
+#define SAVESTATE_COMPAT_BREAK_VERSION 4
 
 enum class SavestateSectionId : uint32
 {
@@ -75,7 +75,7 @@ struct SavestateFileHeader
 	uint64 thumbnailOffset;
 	uint32 thumbnailSize;
 
-	uint8 reserved[126]; // room to extend the header without another format bump
+	uint8 reserved[134]; // room to extend the header without another format bump (keeps sizeof a multiple of 8)
 };
 
 struct SavestateSectionTableEntry
@@ -89,7 +89,12 @@ struct SavestateSectionTableEntry
 	uint32 reserved;
 };
 #define SAVESTATE_COMPRESSION_NONE	0
-#define SAVESTATE_COMPRESSION_ZSTD	1
+#define SAVESTATE_COMPRESSION_ZSTD	1	// legacy single frame, no longer written
+// Independent zstd frames of SAVESTATE_COMPRESSION_BLOCK_SIZE raw bytes each, so they can be
+// (de)compressed in parallel. Stored layout:
+//   uint32 blockRawSize | uint32 blockCount | uint64 compressedSize[blockCount] | frames...
+#define SAVESTATE_COMPRESSION_ZSTD_BLOCKS	2
+#define SAVESTATE_COMPRESSION_BLOCK_SIZE	(4u * 1024u * 1024u)
 
 #pragma pack(pop)
 

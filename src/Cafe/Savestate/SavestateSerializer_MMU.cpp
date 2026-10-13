@@ -1,122 +1,290 @@
 #include "Cafe/Savestate/SavestateSerializer_MMU.h"
+#include "Cafe/Savestate/SavestateParallel.h"
 #include "Cafe/HW/MMU/MMU.h"
+#include <unordered_map>
 
 extern MPTR sysAreaAllocatorOffset; // coreinit_MEM.cpp (global scope)
 
+// Section layout (all values little endian, as stored in host memory):
+//   SectionHeader
+//   RangeRecord[rangeCount]
+//   for every range with wasMapped: bitmap of ceil(blockCount/8) bytes, padded to 8 bytes
+//   packed data: the non-zero blocks, in range order then block order. Every block is
+//                blockSize bytes, except the last block of a range which may be shorter.
 namespace SavestateSerializer_MMU
 {
-	// Per-range record. Order matches memory_getMMURanges() at save
-	// time; on load we match by areaId rather than by vector index, in
-	// case a future Cemu version reorders the global range list.
-	struct RangeRecord
+	static constexpr uint32 BLOCK_SIZE = 64 * 1024;
+	static constexpr char SECTION_MAGIC[8] = { 'C', 'E', 'M', 'M', 'U', '0', '0', '2' };
+
+	struct SectionHeader
 	{
-		MMU_MEM_AREA_ID areaId;
-		bool wasMapped;
-		uint32 size; // current size at save time (may differ from
-					 // initSize() due to a graphic pack's setEnd() -
-					 // see MMU.cpp memory_mapForCurrentTitle())
+		char magic[8];
+		uint32 blockSize;
+		uint32 rangeCount;
+		uint32 sysAreaOffset; // host-side bump pointer of the system-area allocator
+		uint32 reserved;
+		uint64 totalSize;	  // size of the whole section, for validation
 	};
 
-	void DoState(Serializer& s)
+	struct RangeRecord
 	{
-		s.DoMarker("MMU");
-		// host-side bump pointer of the system-area allocator (the area's
-		// content is part of the dump below, the cursor is not)
+		sint32 areaId;
+		uint32 wasMapped;
+		uint32 size;		// size at save time (a graphic pack may have changed it)
+		uint32 blockCount;
+		uint32 nonZeroBlocks;
+		uint32 reserved;
+	};
 
+	static inline uint64 Align8(uint64 v) { return (v + 7) & ~7ull; }
+
+	static bool IsZeroBlock(const uint8* p, size_t n)
+	{
+		size_t words = n / 8;
+		for (size_t i = 0; i + 8 <= words; i += 8)
+		{
+			uint64 w[8];
+			memcpy(w, p + i * 8, 64);
+			if ((w[0] | w[1] | w[2] | w[3] | w[4] | w[5] | w[6] | w[7]) != 0)
+				return false;
+		}
+		// remainder (less than 64 bytes)
+		for (size_t i = (words / 8) * 64; i < n; i++)
+			if (p[i] != 0)
+				return false;
+		return true;
+	}
+
+	struct BlockTask
+	{
+		uint32 rangeIndex;
+		uint32 blockIndex;
+	};
+
+	SavestateBuffer Capture()
+	{
 		std::vector<MMURange*> ranges = memory_getMMURanges();
 
-		if (s.IsWriting() || s.IsMeasuring())
+		struct Info
 		{
-			uint32 count = (uint32)ranges.size();
-			s.DoPOD(count);
-
-			for (MMURange* range : ranges)
-			{
-				RangeRecord record{};
-				record.areaId = range->areaId;
-				record.wasMapped = range->isMapped();
-				record.size = range->getSize();
-				s.DoPOD(record);
-
-				if (record.wasMapped)
-				{
-					// Written as raw bytes straight out of the 4GB
-					// reservation - memory_base + baseAddress, exactly
-					// what MMU.cpp's memory_createDump() already does
-					// per-range for the ramDump debug feature, just
-					// captured into the savestate stream instead of a
-					// separate file.
-					s.DoBytes(range->getPtr(), record.size);
-				}
-			}
-			MPTR sysAreaOffset = sysAreaAllocatorOffset;
-			s.DoPOD(sysAreaOffset);
-			return;
+			MMURange* range;
+			bool mapped;
+			uint32 size;
+			uint32 blockCount;
+			std::vector<uint8> nonZero; // one byte per block during capture
+			uint32 nonZeroCount = 0;
+		};
+		std::vector<Info> infos;
+		infos.reserve(ranges.size());
+		std::vector<BlockTask> tasks;
+		for (MMURange* range : ranges)
+		{
+			Info info{};
+			info.range = range;
+			info.mapped = range->isMapped();
+			info.size = info.mapped ? range->getSize() : 0;
+			info.blockCount = (info.size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+			info.nonZero.assign(info.blockCount, 0);
+			for (uint32 b = 0; b < info.blockCount; b++)
+				tasks.push_back({ (uint32)infos.size(), b });
+			infos.push_back(std::move(info));
 		}
 
-		// --- Reading -----------------------------------------------
+		auto blockLength = [&](const Info& info, uint32 b) -> size_t
+		{
+			return std::min<uint64>(BLOCK_SIZE, (uint64)info.size - (uint64)b * BLOCK_SIZE);
+		};
 
-		uint32 count = 0;
-		s.DoPOD(count);
+		// pass 1: find out which blocks contain data
+		SavestateParallel::For(tasks.size(), [&](size_t i)
+		{
+			Info& info = infos[tasks[i].rangeIndex];
+			uint32 b = tasks[i].blockIndex;
+			const uint8* p = info.range->getPtr() + (uint64)b * BLOCK_SIZE;
+			info.nonZero[b] = IsZeroBlock(p, blockLength(info, b)) ? 0 : 1;
+		});
 
-		// Build a lookup so we can match saved records to the current
-		// range list by areaId regardless of vector ordering.
+		// layout
+		uint64 headerBytes = sizeof(SectionHeader) + sizeof(RangeRecord) * infos.size();
+		for (auto& info : infos)
+		{
+			for (uint32 b = 0; b < info.blockCount; b++)
+				info.nonZeroCount += info.nonZero[b];
+			if (info.mapped)
+				headerBytes += Align8((info.blockCount + 7) / 8);
+		}
+		std::vector<uint64> taskOffset(tasks.size(), 0);
+		uint64 cursor = headerBytes;
+		for (size_t i = 0; i < tasks.size(); i++)
+		{
+			Info& info = infos[tasks[i].rangeIndex];
+			if (info.nonZero[tasks[i].blockIndex])
+			{
+				taskOffset[i] = cursor;
+				cursor += blockLength(info, tasks[i].blockIndex);
+			}
+		}
+
+		SavestateBuffer out = SavestateBuffer::Allocate((size_t)cursor);
+		uint8* base = out.data.get();
+
+		SectionHeader header{};
+		memcpy(header.magic, SECTION_MAGIC, 8);
+		header.blockSize = BLOCK_SIZE;
+		header.rangeCount = (uint32)infos.size();
+		header.sysAreaOffset = (uint32)sysAreaAllocatorOffset;
+		header.totalSize = cursor;
+		memcpy(base, &header, sizeof(header));
+
+		uint64 pos = sizeof(SectionHeader);
+		for (auto& info : infos)
+		{
+			RangeRecord rec{};
+			rec.areaId = (sint32)info.range->areaId;
+			rec.wasMapped = info.mapped ? 1 : 0;
+			rec.size = info.size;
+			rec.blockCount = info.blockCount;
+			rec.nonZeroBlocks = info.nonZeroCount;
+			memcpy(base + pos, &rec, sizeof(rec));
+			pos += sizeof(rec);
+		}
+		for (auto& info : infos)
+		{
+			if (!info.mapped)
+				continue;
+			uint64 bitmapBytes = Align8((info.blockCount + 7) / 8);
+			memset(base + pos, 0, (size_t)bitmapBytes);
+			for (uint32 b = 0; b < info.blockCount; b++)
+				if (info.nonZero[b])
+					base[pos + b / 8] |= (uint8)(1u << (b % 8));
+			pos += bitmapBytes;
+		}
+
+		// pass 2: copy the blocks that contain data
+		SavestateParallel::For(tasks.size(), [&](size_t i)
+		{
+			Info& info = infos[tasks[i].rangeIndex];
+			uint32 b = tasks[i].blockIndex;
+			if (!info.nonZero[b])
+				return;
+			memcpy(base + taskOffset[i], info.range->getPtr() + (uint64)b * BLOCK_SIZE, blockLength(info, b));
+		});
+		return out;
+	}
+
+	void Restore(const SavestateBuffer& section)
+	{
+		const uint8* base = section.data.get();
+		const uint64 totalSize = section.size;
+		auto fail = [](const char* what) { throw SavestateDesyncException("MMU", what); };
+
+		if (totalSize < sizeof(SectionHeader))
+			fail("MMU:truncated");
+		SectionHeader header{};
+		memcpy(&header, base, sizeof(header));
+		if (memcmp(header.magic, SECTION_MAGIC, 8) != 0)
+			fail("MMU:badMagic");
+		if (header.blockSize != BLOCK_SIZE || header.totalSize != totalSize)
+			fail("MMU:badHeader");
+		uint64 pos = sizeof(SectionHeader);
+		if (header.rangeCount > 1024 || pos + sizeof(RangeRecord) * (uint64)header.rangeCount > totalSize)
+			fail("MMU:truncated");
+
+		std::vector<RangeRecord> records(header.rangeCount);
+		if (header.rangeCount)
+			memcpy(records.data(), base + pos, sizeof(RangeRecord) * header.rangeCount);
+		pos += sizeof(RangeRecord) * (uint64)header.rangeCount;
+
+		std::vector<MMURange*> ranges = memory_getMMURanges();
 		std::unordered_map<int, MMURange*> rangeByAreaId;
 		for (MMURange* range : ranges)
 			rangeByAreaId[(int)range->areaId] = range;
 
-		for (uint32 i = 0; i < count; i++)
+		struct Target
 		{
-			RangeRecord record{};
-			s.DoPOD(record);
+			MMURange* range = nullptr;
+			const RangeRecord* rec = nullptr;
+			const uint8* bitmap = nullptr;
+			std::vector<uint64> blockOffset; // offset of each stored block inside the section, ~0 for a zero block
+		};
+		std::vector<Target> targets(records.size());
 
-			auto it = rangeByAreaId.find((int)record.areaId);
+		// 1) validate everything and fix up optional regions BEFORE touching any memory content
+		for (size_t r = 0; r < records.size(); r++)
+		{
+			const RangeRecord& rec = records[r];
+			auto it = rangeByAreaId.find(rec.areaId);
 			if (it == rangeByAreaId.end())
-			{
-				// A range that existed in the file but not in this
-				// build. This should already have been caught by the
-				// compat hash (SavestateCompat.cpp includes build id),
-				// but fail loudly rather than silently drop bytes.
-				throw SavestateDesyncException("MMU:unknownAreaId", "unknownAreaId");
-			}
+				fail("MMU:unknownAreaId");
 			MMURange* range = it->second;
 
-			// OVERLAY_AREA (and any other FLAG_OPTIONAL region) is not
-			// mapped by default - re-enable it if the savestate needs it.
-			if (record.wasMapped && !range->isMapped())
+			// OVERLAY_AREA (and any other FLAG_OPTIONAL region) is not mapped by default
+			if (rec.wasMapped && !range->isMapped())
 			{
 				if (range->areaId == MMU_MEM_AREA_ID::OVERLAY)
 					memory_enableOverlayArena();
 				else if (range->isOptional())
 					range->mapMem();
-				// FLAG_MAP_EARLY ranges (CEMU_AREA, SHARED_AREA) are
-				// always mapped well before a savestate can be loaded,
-				// so they fall through here already mapped.
 			}
-			else if (!record.wasMapped && range->isMapped() && range->isOptional())
+			else if (!rec.wasMapped && range->isMapped() && range->isOptional())
 			{
-				// Savestate was made without this optional region -
-				// unmap it so behavior matches exactly.
 				range->unmapMem();
 			}
-
-			if (record.wasMapped)
-			{
-				if (record.size != range->getSize())
-				{
-					// A graphic pack changed a range's size between
-					// save and load (setEnd() in memory_mapForCurrentTitle()).
-					// SavestateCompat.cpp's hash should already prevent
-					// this, but guard here too rather than corrupt
-					// memory on a partial mismatch.
-					throw SavestateDesyncException("MMU:sizeMismatch", "sizeMismatch");
-				}
-				s.DoBytes(range->getPtr(), record.size);
-			}
+			if (!rec.wasMapped)
+				continue;
+			if (!range->isMapped())
+				fail("MMU:rangeNotMapped");
+			if (rec.size != range->getSize())
+				fail("MMU:sizeMismatch");
+			if (rec.blockCount != (rec.size + BLOCK_SIZE - 1) / BLOCK_SIZE)
+				fail("MMU:badBlockCount");
+			uint64 bitmapBytes = Align8((rec.blockCount + 7) / 8);
+			if (pos + bitmapBytes > totalSize)
+				fail("MMU:truncated");
+			targets[r].range = range;
+			targets[r].rec = &rec;
+			targets[r].bitmap = base + pos;
+			pos += bitmapBytes;
 		}
+		uint64 dataCursor = pos;
+		std::vector<BlockTask> tasks;
+		for (size_t r = 0; r < records.size(); r++)
+		{
+			Target& t = targets[r];
+			if (!t.range)
+				continue;
+			t.blockOffset.assign(t.rec->blockCount, ~0ull);
+			uint32 stored = 0;
+			for (uint32 b = 0; b < t.rec->blockCount; b++)
+			{
+				if (t.bitmap[b / 8] & (1u << (b % 8)))
+				{
+					uint64 len = std::min<uint64>(BLOCK_SIZE, (uint64)t.rec->size - (uint64)b * BLOCK_SIZE);
+					t.blockOffset[b] = dataCursor;
+					dataCursor += len;
+					stored++;
+				}
+				tasks.push_back({ (uint32)r, b });
+			}
+			if (stored != t.rec->nonZeroBlocks)
+				fail("MMU:badBlockCount");
+		}
+		if (dataCursor != totalSize)
+			fail("MMU:badSize");
 
-		MPTR sysAreaOffset = 0;
-		s.DoPOD(sysAreaOffset);
-		sysAreaAllocatorOffset = sysAreaOffset;
+		// 2) restore, in parallel. Blocks that are zero both in the file and in live memory are left alone
+		SavestateParallel::For(tasks.size(), [&](size_t i)
+		{
+			Target& t = targets[tasks[i].rangeIndex];
+			uint32 b = tasks[i].blockIndex;
+			uint64 len = std::min<uint64>(BLOCK_SIZE, (uint64)t.rec->size - (uint64)b * BLOCK_SIZE);
+			uint8* live = t.range->getPtr() + (uint64)b * BLOCK_SIZE;
+			if (t.blockOffset[b] != ~0ull)
+				memcpy(live, base + t.blockOffset[b], (size_t)len);
+			else if (!IsZeroBlock(live, (size_t)len))
+				memset(live, 0, (size_t)len);
+		});
+
+		sysAreaAllocatorOffset = header.sysAreaOffset;
 	}
 }

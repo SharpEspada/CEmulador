@@ -809,7 +809,7 @@ namespace iosu
 				return false;
 			}
 			std::unique_lock<std::mutex> waiterLock(waiter->mutex);
-			if (!waiter->cv.wait_for(waiterLock, std::chrono::seconds(10), [&]() { return waiter->done; }))
+			if (!waiter->cv.wait_for(waiterLock, std::chrono::seconds(3), [&]() { return waiter->done; }))
 				return false; // waiter intentionally leaked, the device thread may still write to it
 			resultOut = waiter->result;
 			waiterLock.unlock();
@@ -848,7 +848,12 @@ namespace iosu
 		bool Savestate_RestoreActiveHandles(const std::vector<SavestateHandleRecord>& records, uint32 handleCounter, std::vector<SavestateHandleRemap>& remapOut, std::string& errorOut)
 		{
 			remapOut.clear();
-			// 1. close every currently open device handle on the device side
+			// Handles that are already open exactly as in the savestate (same slot, check value,
+			// device path and device-side handle) are kept as they are: no IPC traffic at all.
+			// This is the normal case when loading a state into the same running game and it
+			// keeps the load fast and free of any device interaction.
+			std::vector<bool> keptSlot(MAX_NUM_ACTIVE_DEV_HANDLES, false);
+			// 1. close every currently open device handle that does not match the savestate
 			for (size_t i = 0; i < MAX_NUM_ACTIVE_DEV_HANDLES; i++)
 			{
 				std::unique_lock _lock(sInternalMutex);
@@ -856,6 +861,25 @@ namespace iosu
 					continue;
 				IPCActiveDeviceHandle h = sActiveDeviceHandles[i];
 				_lock.unlock();
+				bool matches = false;
+				for (const SavestateHandleRecord& rec : records)
+				{
+					if (rec.index != i || !rec.hasTarget || !h.hasDispatchTargetHandle)
+						continue;
+					std::string recPath(rec.path, strnlen(rec.path, sizeof(rec.path)));
+					if (rec.handleCheckValue == h.handleCheckValue && recPath == h.path && rec.targetHandle == (uint32)h.dispatchTargetHandle)
+						matches = true;
+				}
+				if (matches)
+				{
+					keptSlot[i] = true;
+					SavestateHandleRemap remap;
+					remap.path = h.path;
+					remap.oldTarget = (uint32)h.dispatchTargetHandle;
+					remap.newTarget = (uint32)h.dispatchTargetHandle;
+					remapOut.push_back(remap);
+					continue;
+				}
 				if (h.hasDispatchTargetHandle)
 				{
 					sint32 r = 0;
@@ -875,7 +899,7 @@ namespace iosu
 			// 2. reopen the saved ones, with the same handle values the guest knows
 			for (const SavestateHandleRecord& rec : records)
 			{
-				if (!rec.hasTarget || rec.index >= MAX_NUM_ACTIVE_DEV_HANDLES)
+				if (!rec.hasTarget || rec.index >= MAX_NUM_ACTIVE_DEV_HANDLES || keptSlot[rec.index])
 					continue;
 				std::string path(rec.path, strnlen(rec.path, sizeof(rec.path)));
 				std::unique_lock _lock(sInternalMutex);

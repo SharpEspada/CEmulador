@@ -199,6 +199,7 @@ bool Latte_GetStopSignal(); // returns true if stop was requested or if in stopp
 void Latte_RequestPause();   // call from the savestate barrier to ask the GPU thread to park
 void Latte_ResumePause();    // call to let it continue
 void Latte_WaitForPause();   // blocks until the GPU thread has actually parked
+bool Latte_WaitForPauseWithTimeout(uint32 timeoutMs); // false if the GPU thread did not park in time (caller must call Latte_ResumePause())
 bool Latte_IsPauseRequested();
 void Latte_SetPausedState(bool isPaused); // called only by the GPU thread itself, from its idle loop
 

@@ -1,5 +1,6 @@
 #include "Cafe/Savestate/SavestateManager.h"
 #include "Cafe/Savestate/SavestateFormat.h"
+#include "Cafe/Savestate/SavestateFile.h"
 #include "Cafe/Savestate/SavestateSerializer.h"
 #include "Cafe/Savestate/SavestateSerializer_MMU.h"
 #include "Cafe/Savestate/SavestateSerializer_RPL.h"
@@ -9,11 +10,11 @@
 #include "Cafe/Savestate/SavestateSerializer_GPU.h"
 #include "Cafe/Savestate/SavestateSerializer_IOSU.h"
 #include "Cafe/Savestate/SavestateSlots.h"
-#include "Cafe/Savestate/SavestateFile.h"
 #include "Cafe/CafeSystem.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 #include "config/ActiveSettings.h"
-#include "Cafe/HW/Latte/Core/Latte.h" // Latte_Stop/Latte_GetStopSignal
+#include "Cafe/HW/Latte/Core/Latte.h" // Latte pause API
+#include <chrono>
 
 namespace SavestateManager
 {
@@ -21,92 +22,78 @@ namespace SavestateManager
 
 	bool IsBusy() { return s_busy.load(); }
 
-	// ------------------------------------------------------------------
-	// The barrier. Every host thread that could be mid-execution of
-	// guest code must reach a safe, non-mid-syscall point before ANY
-	// DoState() below touches memory.
-	//
-	// CPU/thread side: reuses coreinit::OSSchedulerEnd()/OSSchedulerBegin(),
-	// real existing engine code (CafeSystem.cpp's _LaunchTitleThread()
-	// is the only other caller). Verified against coreinit_Thread.cpp:
-	// every host fiber's context is already flushed to guest memory
-	// (OSContext_t, via __OSThreadStoreContext) by the time
-	// OSSchedulerEnd() returns - see Cafe/Savestate/NOTE_pas_de_section_CPU.md.
-	//
-	// GPU side: Latte_Stop()/Latte_Start() were deliberately NOT reused
-	// here - they tear down and fully reinitialize the renderer (see
-	// Latte.h for the full reasoning). A separate, lightweight pause
-	// was added instead (Latte_RequestPause/WaitForPause/ResumePause),
-	// checked at the exact same safe idle point as the stop signal.
-	// ------------------------------------------------------------------
-	struct Barrier
+	using Clock = std::chrono::steady_clock;
+	static long long MsSince(Clock::time_point t)
 	{
-		sint32 m_numCores = 1;
+		return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t).count();
+	}
+	static void Trace(const std::string& text)
+	{
+		cemuLog_log(LogType::Force, std::string("[Savestate] ") + text);
+	}
 
-		void StopAll()
+	// Keeps s_busy set for the whole operation (including the disk write) and always clears it.
+	struct BusyGuard
+	{
+		bool owns = false;
+		BusyGuard()
 		{
-			// Matches the exact condition CafeSystem.cpp's
-			// _LaunchTitleThread() uses for the initial OSSchedulerBegin()
-			// call, captured here since it can't be queried after
-			// OSSchedulerEnd() tears the scheduler state down.
-			m_numCores = coreinit::__CemuIsMulticoreMode() ? 3 : 1;
-
-			Latte_RequestPause();
-			coreinit::OSSchedulerEnd();
-			Latte_WaitForPause();
+			bool expected = false;
+			owns = s_busy.compare_exchange_strong(expected, true);
 		}
-
-		void ResumeAll()
+		~BusyGuard()
 		{
-			coreinit::OSSchedulerBegin(m_numCores);
-			SavestateSerializer_Thread::RecreateHostThreadsAfterPause();
-			Latte_ResumePause();
+			if (owns)
+				s_busy.store(false);
 		}
 	};
 
 	// ------------------------------------------------------------------
-	// Fixed section ordering. See individual serializer files for why
-	// this exact order matters - in short:
-	//   RPL before MMU: RPL's reload-by-name step (load path) and any
-	//     allocator bookkeeping writes must land in guest memory before
-	//     the flat MMU dump is taken/restored.
-	//   GPU texture readback before MMU: forces GPU-dirty texture data
-	//     into guest RAM so the MMU dump captures it (spec doc §5).
-	//   Sync before Thread (load path only): a waiting thread's queue
-	//     link must resolve against an already-restored primitive.
+	// The barrier. Every host thread that could be mid-execution of
+	// guest code must reach a safe, non-mid-syscall point before ANY
+	// state is read or written.
+	//
+	// CPU side: coreinit::OSSchedulerEnd()/OSSchedulerBegin(). After End returns,
+	// every guest thread's context is stored in guest memory.
+	//
+	// GPU side: a lightweight pause (Latte_RequestPause/WaitForPause/ResumePause), reached
+	// when the command processor is idle. The wait has a timeout so that a GPU thread that
+	// cannot become idle never freezes the emulator: the request is refused and retried.
+	//
+	// Resume order matters: the host fibers of the guest threads and the run-queue
+	// counters must be rebuilt BEFORE the scheduler threads start, otherwise a scheduler
+	// thread could pick a guest thread that has no fiber yet.
 	// ------------------------------------------------------------------
-
-	static std::vector<uint8> BuildSaveSections(std::vector<std::pair<SavestateSectionId, std::vector<uint8>>>& outSections)
+	struct Barrier
 	{
-		// 1. GPU texture readback - writes into guest RAM, must precede MMU.
-		SavestateSerializer_GPU::SyncDirtyTexturesToGuestMemory();
+		sint32 m_numCores = 1;
+		bool m_stopped = false;
 
-		outSections.emplace_back(SavestateSectionId::GPU,
-			Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_GPU::DoState(s); }));
+		// returns false if the GPU did not park in time (call ResumeAll() then)
+		bool StopAll()
+		{
+			m_numCores = coreinit::__CemuIsMulticoreMode() ? 3 : 1;
+			Latte_RequestPause();
+			coreinit::OSSchedulerEnd();
+			m_stopped = true;
+			return Latte_WaitForPauseWithTimeout(4000);
+		}
 
-		outSections.emplace_back(SavestateSectionId::RPL,
-			Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_RPL::DoState_Save(s); }));
+		void ResumeAll()
+		{
+			if (!m_stopped)
+				return;
+			m_stopped = false;
+			SavestateSerializer_Thread::RecreateHostThreadsAfterPause();
+			coreinit::OSSchedulerBegin(m_numCores);
+			Latte_ResumePause();
+		}
+	};
 
-		// MMU last among the "writes into guest RAM" producers, first
-		// among the pure "read guest RAM" consumers - captures
-		// everything the two steps above just wrote.
-		outSections.emplace_back(SavestateSectionId::MMU,
-			Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_MMU::DoState(s); }));
-
-		outSections.emplace_back(SavestateSectionId::IOSU,
-			Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_IOSU::DoState_Save(s); }));
-
-		outSections.emplace_back(SavestateSectionId::SYNC,
-			Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_Sync::DoState(s); }));
-
-		outSections.emplace_back(SavestateSectionId::THREAD,
-			Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_Thread::DoState(s); }));
-
-		outSections.emplace_back(SavestateSectionId::ALARM,
-			Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_Alarm::DoState(s); }));
-
-		return {};
-	}
+	struct SectionBuffers
+	{
+		SavestateBuffer rpl, mmu, iosu, gpu, sync, thread, alarm;
+	};
 
 	static Result DoSave(const std::filesystem::path& path)
 	{
@@ -122,58 +109,77 @@ namespace SavestateManager
 		if (!SavestateSerializer_Thread::CanSafelySave())
 			return Result::RefusedThreadInOSWaitCond;
 
-		bool expected = false;
-		if (!s_busy.compare_exchange_strong(expected, true))
+		BusyGuard busy;
+		if (!busy.owns)
 			return Result::Busy;
 
-		Barrier barrier;
-		barrier.StopAll();
+		auto tStart = Clock::now();
+		SavestateSerializer_GPU::SyncDirtyTexturesToGuestMemory();
 
+		Barrier barrier;
+		bool gpuParked = barrier.StopAll();
+		auto tPaused = Clock::now();
+		if (!gpuParked)
+		{
+			barrier.ResumeAll();
+			return Result::RefusedGPUBusy;
+		}
 		if (!SavestateSerializer_Alarm::CanSafelySave())
 		{
 			barrier.ResumeAll();
-			s_busy.store(false);
 			return Result::RefusedAlarmCallbackRunning;
 		}
-
 		if (!SavestateSerializer_IOSU::IsQuiescent())
 		{
 			barrier.ResumeAll();
-			s_busy.store(false);
 			return Result::RefusedIOSUBusy;
 		}
 
-		std::vector<std::pair<SavestateSectionId, std::vector<uint8>>> sections;
+		// 1) Copy everything out while the game is paused. This is the only part that
+		//    holds the game: no compression and no disk access happen here.
+		SavestateFile::Writer writer;
 		try
 		{
-			BuildSaveSections(sections);
+			auto tSection = Clock::now();
+			writer.AddSection(SavestateSectionId::GPU,
+				Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_GPU::DoState(s); }));
+			writer.AddSection(SavestateSectionId::RPL,
+				Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_RPL::DoState_Save(s); }));
+			Trace(fmt::format("save: modules/GPU state captured ({} ms)", MsSince(tSection)));
+
+			tSection = Clock::now();
+			SavestateBuffer mmu = SavestateSerializer_MMU::Capture();
+			Trace(fmt::format("save: RAM captured, {} MiB kept ({} ms)", mmu.size / (1024 * 1024), MsSince(tSection)));
+			writer.AddSection(SavestateSectionId::MMU, std::move(mmu));
+
+			writer.AddSection(SavestateSectionId::IOSU,
+				Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_IOSU::DoState_Save(s); }));
+			writer.AddSection(SavestateSectionId::SYNC,
+				Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_Sync::DoState(s); }));
+			writer.AddSection(SavestateSectionId::THREAD,
+				Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_Thread::DoState(s); }));
+			writer.AddSection(SavestateSectionId::ALARM,
+				Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_Alarm::DoState(s); }));
 		}
 		catch (...)
 		{
 			// never leave the emulation frozen
 			barrier.ResumeAll();
-			s_busy.store(false);
 			throw;
 		}
 
+		auto tResume = Clock::now();
 		barrier.ResumeAll();
-		s_busy.store(false);
+		Trace(fmt::format("save: game was paused {} ms in total (resume took {} ms)", MsSince(tPaused), MsSince(tResume)));
 
-		// Actual file writing happens with the emulator already
-		// resumed - the barrier only needs to be held for the duration
-		// of copying state out, not for the (potentially slow) disk
-		// write. See spec doc's "Sauvegarde en deux temps" note.
-		SavestateFile::Writer writer;
-		for (auto& [id, bytes] : sections)
-			writer.AddSection(id, std::move(bytes));
-
+		// 2) Compression and disk write run with the game already running again.
+		auto tWrite = Clock::now();
 		std::vector<uint8> thumbnail; // TODO: capture a small PNG of the current frame here
 		uint64 titleId = CafeSystem::GetForegroundTitleId();
 		uint16 titleVersion = CafeSystem::GetForegroundTitleVersion();
-
-		if (!writer.WriteToFile(path, titleId, titleVersion, thumbnail))
-			return Result::FileError;
-		return Result::OK;
+		bool ok = writer.WriteToFile(path, titleId, titleVersion, thumbnail);
+		Trace(fmt::format("save: file written in background ({} ms), total {} ms", MsSince(tWrite), MsSince(tStart)));
+		return ok ? Result::OK : Result::FileError;
 	}
 
 	static Result DoLoad(const std::filesystem::path& path)
@@ -181,16 +187,19 @@ namespace SavestateManager
 		if (ActiveSettings::IsOnlineEnabled())
 			return Result::RefusedOnlineSession;
 
-		bool expected = false;
-		if (!s_busy.compare_exchange_strong(expected, true))
+		BusyGuard busy;
+		if (!busy.owns)
 			return Result::Busy;
 
+		auto tStart = Clock::now();
+
+		// Everything that does not need the game to be paused is done first, while the
+		// game keeps running: read the file, verify it, decompress all sections.
 		SavestateFile::Reader reader;
 		uint64 expectedTitleId = CafeSystem::GetForegroundTitleId();
 		auto error = reader.OpenAndValidate(path, expectedTitleId);
 		if (error != SavestateFile::LoadError::OK)
 		{
-			s_busy.store(false);
 			switch (error)
 			{
 			case SavestateFile::LoadError::WrongTitle: return Result::WrongTitle;
@@ -200,59 +209,81 @@ namespace SavestateManager
 			default: return Result::FileError;
 			}
 		}
+		SectionBuffers sec;
+		try
+		{
+			sec.rpl = reader.GetSection(SavestateSectionId::RPL);
+			sec.mmu = reader.GetSection(SavestateSectionId::MMU);
+			sec.iosu = reader.GetSection(SavestateSectionId::IOSU);
+			sec.gpu = reader.GetSection(SavestateSectionId::GPU);
+			sec.sync = reader.GetSection(SavestateSectionId::SYNC);
+			sec.thread = reader.GetSection(SavestateSectionId::THREAD);
+			sec.alarm = reader.GetSection(SavestateSectionId::ALARM);
+		}
+		catch (const std::exception&)
+		{
+			return Result::FileError;
+		}
+		Trace(fmt::format("load: file read and decompressed while the game was still running ({} ms)", MsSince(tStart)));
 
 		Barrier barrier;
-		barrier.StopAll();
-
+		bool gpuParked = barrier.StopAll();
+		auto tPaused = Clock::now();
+		if (!gpuParked)
+		{
+			barrier.ResumeAll();
+			return Result::RefusedGPUBusy;
+		}
 		if (!SavestateSerializer_IOSU::IsQuiescent())
 		{
 			barrier.ResumeAll();
-			s_busy.store(false);
 			return Result::RefusedIOSUBusy;
 		}
 
 		try
 		{
-			// Load order: RPL (reloads modules + relinks) -> MMU (flat
-			// memory dump, overwrites whatever RPL's reload just set up,
-			// which is fine/expected - MMU is authoritative for final byte
-			// contents) -> GPU -> Sync -> Thread (needs Sync already
-			// restored, see ordering note above) -> Alarm.
-			Savestate_DeserializeSection(reader.GetSection(SavestateSectionId::RPL),
-				[](Serializer& s) { SavestateSerializer_RPL::DoState_Load(s); });
+			// RPL first: it verifies that the running game has the same modules and
+			// refuses cleanly BEFORE anything is overwritten.
+			auto tSection = Clock::now();
+			Savestate_DeserializeSection(sec.rpl, [](Serializer& s) { SavestateSerializer_RPL::DoState_Load(s); });
+			Trace(fmt::format("load: modules checked ({} ms)", MsSince(tSection)));
 
-			Savestate_DeserializeSection(reader.GetSection(SavestateSectionId::MMU),
-				[](Serializer& s) { SavestateSerializer_MMU::DoState(s); });
+			tSection = Clock::now();
+			SavestateSerializer_MMU::Restore(sec.mmu);
+			Trace(fmt::format("load: RAM restored ({} ms)", MsSince(tSection)));
 
 			// IOSU after MMU: it uses the (restored) IPC request pool in guest memory
-			Savestate_DeserializeSection(reader.GetSection(SavestateSectionId::IOSU),
-				[](Serializer& s) { SavestateSerializer_IOSU::DoState_Load(s); });
+			tSection = Clock::now();
+			Savestate_DeserializeSection(sec.iosu, [](Serializer& s) { SavestateSerializer_IOSU::DoState_Load(s); });
+			Trace(fmt::format("load: IOSU/file handles restored ({} ms)", MsSince(tSection)));
 
-			Savestate_DeserializeSection(reader.GetSection(SavestateSectionId::GPU),
-				[](Serializer& s) { SavestateSerializer_GPU::DoState(s); });
+			tSection = Clock::now();
+			Savestate_DeserializeSection(sec.gpu, [](Serializer& s) { SavestateSerializer_GPU::DoState(s); });
 			SavestateSerializer_GPU::InvalidateHostCachesAfterLoad();
+			Trace(fmt::format("load: GPU state restored, caches dropped ({} ms)", MsSince(tSection)));
 
-			Savestate_DeserializeSection(reader.GetSection(SavestateSectionId::SYNC),
-				[](Serializer& s) { SavestateSerializer_Sync::DoState(s); });
-
-			Savestate_DeserializeSection(reader.GetSection(SavestateSectionId::THREAD),
-				[](Serializer& s) { SavestateSerializer_Thread::DoState(s); });
-
-			Savestate_DeserializeSection(reader.GetSection(SavestateSectionId::ALARM),
-				[](Serializer& s) { SavestateSerializer_Alarm::DoState(s); });
-
+			Savestate_DeserializeSection(sec.sync, [](Serializer& s) { SavestateSerializer_Sync::DoState(s); });
+			Savestate_DeserializeSection(sec.thread, [](Serializer& s) { SavestateSerializer_Thread::DoState(s); });
+			Savestate_DeserializeSection(sec.alarm, [](Serializer& s) { SavestateSerializer_Alarm::DoState(s); });
 		}
-		catch (...)
+		catch (const std::exception& e)
 		{
 			// The emulated state may be inconsistent now, but never leave the
 			// emulation frozen / the manager locked: report the error instead.
+			Trace(std::string("load FAILED: ") + e.what());
 			barrier.ResumeAll();
-			s_busy.store(false);
+			throw;
+		}
+		catch (...)
+		{
+			barrier.ResumeAll();
 			throw;
 		}
 
+		auto tResume = Clock::now();
 		barrier.ResumeAll();
-		s_busy.store(false);
+		Trace(fmt::format("load: game was paused {} ms in total (resume took {} ms), total {} ms",
+			MsSince(tPaused), MsSince(tResume), MsSince(tStart)));
 		return Result::OK;
 	}
 
@@ -266,7 +297,8 @@ namespace SavestateManager
 	static bool IsTransientRefusal(Result r)
 	{
 		return r == Result::RefusedMidModuleLoad || r == Result::RefusedThreadInOSWaitCond ||
-			   r == Result::RefusedAlarmCallbackRunning || r == Result::RefusedIOSUBusy;
+			   r == Result::RefusedAlarmCallbackRunning || r == Result::RefusedIOSUBusy ||
+			   r == Result::RefusedGPUBusy;
 	}
 
 	template<typename Fn>

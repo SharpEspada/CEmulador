@@ -182,7 +182,9 @@ add_library(CemuCafe
   HW/MMU/MMU.h
   Savestate/SavestateCompat.cpp
   Savestate/SavestateCompat.h
+  Savestate/SavestateFile.h
   Savestate/SavestateFormat.h
+  Savestate/SavestateParallel.h
   Savestate/SavestateManager.cpp
   Savestate/SavestateManager.h
   Savestate/SavestateSerializer.cpp

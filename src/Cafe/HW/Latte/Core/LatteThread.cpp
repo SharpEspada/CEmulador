@@ -51,6 +51,18 @@ void Latte_WaitForPause()
 		std::this_thread::yield();
 }
 
+bool Latte_WaitForPauseWithTimeout(uint32 timeoutMs)
+{
+	auto start = std::chrono::steady_clock::now();
+	while (!sLattePaused.load(std::memory_order_acquire))
+	{
+		if (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(timeoutMs))
+			return false;
+		std::this_thread::yield();
+	}
+	return true;
+}
+
 bool Latte_IsPauseRequested()
 {
 	return sLattePauseRequested.load(std::memory_order_acquire);

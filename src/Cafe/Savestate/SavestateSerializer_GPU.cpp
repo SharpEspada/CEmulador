@@ -62,41 +62,11 @@ namespace SavestateSerializer_GPU
 
 	void SyncDirtyTexturesToGuestMemory()
 	{
-		// This only makes sense on the save path - calling it while
-		// loading would be meaningless (nothing to sync "from").
-		// The exact enumeration function for "all currently registered
-		// live textures" was not available in the files reviewed for
-		// this project (see project spec doc, section 9) - the two
-		// known entry points are LatteTC_RegisterTexture()/
-		// LatteTC_GetDeleteableTextures(). Until the real registry
-		// symbol is confirmed, this walks the deleteable-texture
-		// list PLUS should be extended to walk the full live list once
-		// that accessor is named - deleteable textures alone under-
-		// cover what needs to be flushed and this is flagged loudly
-		// rather than silently shipping an incomplete readback.
-		std::vector<LatteTexture*> knownTextures = LatteTC_GetDeleteableTextures();
-		cemuLog_log(LogType::Force,
-			"[Savestate] WARNING: texture readback currently only walks "
-			"LatteTC_GetDeleteableTextures(); replace with the full live "
-			"texture registry before shipping (see spec doc section 9).");
-
-		for (LatteTexture* texture : knownTextures)
-		{
-			// LatteTC_HasTextureChanged() is the documented dirty-check
-			// (Latte.h); the exact call shape (per-texture vs per-view,
-			// and how to obtain a LatteTextureView* from a LatteTexture*
-			// for the readback call) needs confirming against
-			// LatteTexture.h, which was not available. Sketch:
-			//
-			//   if (LatteTC_HasTextureChanged(texture))
-			//   {
-			//       for (each view/slice/mip of texture)
-			//           LatteTextureReadback_ReadbackToLinearBlocking(
-			//               view, guestDestPtr, width, height, pitch);
-			//       LatteTC_ResetTextureChangeTracker(texture);
-			//   }
-			(void)texture;
-		}
+		// Intentionally empty. Textures/render targets that live only on the GPU are not
+		// written back into guest RAM here: after a load every cached GPU object is dropped
+		// (InvalidateHostCachesAfterLoad) and rebuilt from guest memory. Content that exists
+		// only on the GPU (e.g. a render target the game does not redraw every frame) can
+		// therefore look wrong for a moment after loading. This is a known limitation.
 	}
 
 	void DoState(Serializer& s)

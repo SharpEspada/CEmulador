@@ -21,6 +21,7 @@ namespace SavestateManager
 		RefusedThreadInOSWaitCond, // a thread is parked in OSWaitCond - see SavestateSerializer_Thread.h, confirmed unsafe to resume
 		RefusedAlarmCallbackRunning, // alarm thread is executing a guest callback, retry
 		RefusedIOSUBusy,		// an IOSU request (file access...) is in flight, retry
+		RefusedGPUBusy,			// the GPU thread did not reach an idle point in time, retry
 		FileError,
 		IncompatibleFile,		// SavestateFile::LoadError, see SavestateSerializer.cpp
 		WrongTitle,

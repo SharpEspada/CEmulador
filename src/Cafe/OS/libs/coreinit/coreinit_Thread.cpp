@@ -133,6 +133,39 @@ namespace coreinit
 		srwlock_activeThreadList.UnlockWrite();
 	}
 
+	// Replaces the host-side active thread list (activeThread[]/activeThreadCount are NOT in
+	// guest memory, so the memory restore does not cover them).
+	// Must be called while the scheduler is stopped.
+	void Savestate_ReplaceActiveThreadList(const std::vector<MPTR>& threads)
+	{
+		srwlock_activeThreadList.LockWrite();
+		sint32 count = (sint32)std::min<size_t>(threads.size(), 256);
+		for (sint32 i = 0; i < count; i++)
+			activeThread[i] = threads[i];
+		activeThreadCount = count;
+		srwlock_activeThreadList.UnlockWrite();
+	}
+
+	// The per-core "number of runnable threads" counters are host-side and drive the idle loops.
+	// After the guest run queues were replaced they must be recomputed. Scheduler lock must be held.
+	void Savestate_ResyncRunQueueCounters()
+	{
+		cemu_assert_debug(__OSHasSchedulerLock());
+		for (sint32 i = 0; i < PPC_CORE_COUNT; i++)
+		{
+			uint32 count = 0;
+			OSThread_t* itr = g_coreRunQueue.GetPtr()[i].head.GetPtr();
+			while (itr && count < 100000)
+			{
+				count++;
+				itr = itr->linkRun[i].next.GetPtr();
+			}
+			g_coreRunQueueThreadCount[i].reset();
+			for (uint32 n = 0; n < count; n++)
+				g_coreRunQueueThreadCount[i].increment();
+		}
+	}
+
 	std::vector<MPTR> Savestate_GetActiveThreadList()
 	{
 		std::vector<MPTR> result;

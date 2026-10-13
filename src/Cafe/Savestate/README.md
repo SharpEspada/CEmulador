@@ -120,3 +120,17 @@ directement dans ce dépôt (pas de patch à part à appliquer soi-même).
 - Les refus transitoires (module en cours de chargement, OSWaitCond, callback d'alarme, requête IOSU) sont réessayés
   pendant 3 secondes avant d'être signalés.
 - Non couverts : états hôte des autres modules HLE (boss, nsyshid, nfp/ntag, audio AX, clients IOSU autres que FSA).
+
+
+## Version 3 : performances et corrections (octobre 2026)
+
+- RAM : copie parallèle par blocs de 64 Kio, blocs entièrement à zéro non stockés (`SavestateSerializer_MMU.cpp`).
+  Seule cette copie se fait pendant que le jeu est en pause. Compression (zstd par blocs de 4 Mio, en parallèle)
+  et écriture disque se font ensuite, jeu relancé.
+- Chargement : lecture, vérification et décompression AVANT la pause du jeu ; pendant la pause il ne reste que la copie en RAM.
+- Liste des threads du jeu (`activeThread[]`, en mémoire hôte) : maintenant sauvegardée/restaurée (`SavestateSerializer_Thread.cpp`).
+- Reprise : fibres des threads + compteurs de run-queue reconstruits AVANT de relancer le scheduler (`SavestateManager.cpp`).
+- Attente du GPU avec délai maximum (4 s) : refus + nouvel essai automatique au lieu d'un gel.
+- IOSU : les handles déjà ouverts à l'identique ne sont pas fermés/rouverts (aucun échange IPC dans le cas normal).
+- Journal : chaque étape écrit sa durée dans la fenêtre de log (`[Savestate] ...`).
+- Format : SAVESTATE_COMPAT_BREAK_VERSION = 4 (les anciens fichiers .cemustate ne sont plus lisibles).

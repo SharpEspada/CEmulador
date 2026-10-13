@@ -44,20 +44,32 @@ namespace SavestateSerializer_Thread
 		return true;
 	}
 
+	// The list of active guest threads lives in HOST memory (activeThread[]), so it must be
+	// saved and restored explicitly - the RAM dump does not contain it.
 	void DoState(Serializer& s)
 	{
 		s.DoMarker("Thread");
 		if (s.IsWriting() || s.IsMeasuring())
 		{
-			uint32 count = (uint32)coreinit::Savestate_GetActiveThreadList().size();
+			std::vector<MPTR> list = coreinit::Savestate_GetActiveThreadList();
+			uint32 count = (uint32)list.size();
 			s.DoPOD(count);
+			for (MPTR& threadAddr : list)
+				s.DoMPTR(threadAddr);
 			return;
 		}
-		uint32 expectedCount = 0;
-		s.DoPOD(expectedCount);
-		uint32 actualCount = (uint32)coreinit::Savestate_GetActiveThreadList().size();
-		if (expectedCount != actualCount)
-			throw SavestateDesyncException("Thread:activeCountMismatch", "activeCountMismatch");
+		uint32 count = 0;
+		s.DoPOD(count);
+		if (count > 256)
+			throw SavestateDesyncException("Thread:tooManyThreads", "tooManyThreads");
+		std::vector<MPTR> list(count);
+		for (MPTR& threadAddr : list)
+		{
+			s.DoMPTR(threadAddr);
+			if (!memory_isAddressRangeAccessible(threadAddr, sizeof(OSThread_t)))
+				throw SavestateDesyncException("Thread:badThreadAddress", "badThreadAddress");
+		}
+		coreinit::Savestate_ReplaceActiveThreadList(list);
 	}
 
 	void RecreateHostThreadsAfterPause()
@@ -91,6 +103,7 @@ namespace SavestateSerializer_Thread
 		}
 
 		coreinit::Savestate_RecreateHostThreadsForActiveThreads();
+		coreinit::Savestate_ResyncRunQueueCounters();
 
 		__OSUnlockScheduler();
 	}

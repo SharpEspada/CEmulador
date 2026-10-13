@@ -641,6 +641,13 @@ namespace coreinit
 	// Snapshot of activeThread[0..activeThreadCount) as guest MPTR
 	// values.
 	std::vector<MPTR> Savestate_GetActiveThreadList();
+
+	// Replaces activeThread[]/activeThreadCount (host memory, not covered by the RAM restore).
+	void Savestate_ReplaceActiveThreadList(const std::vector<MPTR>& threads);
+
+	// Recomputes the host-side per-core runnable-thread counters from the guest run queues.
+	// Scheduler lock must be held.
+	void Savestate_ResyncRunQueueCounters();
 }
 
 #pragma pack()

@@ -1,18 +1,25 @@
 #pragma once
 #include "Cafe/Savestate/SavestateSerializer.h"
 
-// Serializes / restores every currently mapped MMURange in one flat
-// pass. See MMU.h/.cpp: this is deliberately simple because
-// memory_getMMURanges() already returns the complete, fixed list of
-// regions, virtual==physical 1:1, and the game's own heap metadata
-// lives inside the dumped bytes (nothing extra to reconstruct there).
+// Captures / restores every currently mapped MMURange (the guest RAM).
 //
-// IMPORTANT ordering requirement: this must run AFTER
-// SavestateSerializer_GPU's texture readback step (LatteTextureReadback_
-// ReadbackToLinearBlocking on GPU-dirty textures) and AFTER
-// SavestateSerializer_RPL has finished any in-flight allocator work, so
-// that everything those steps write into guest RAM is captured here.
+// Speed design (guest RAM is ~2 GB of address space, but most of it is untouched zeros):
+//   * memory is processed in 64 KiB blocks, in parallel on several host threads
+//   * all-zero blocks are not stored at all (one bit in a bitmap)
+//   * the snapshot is a plain uninitialized buffer, compression and disk writing are done
+//     later by the caller while the emulation is already running again
+//   * on load, blocks that are already zero in the live memory and zero in the savestate
+//     are not touched, so untouched pages are never committed.
+//
+// The section is self-describing; layout is documented in the .cpp.
+//
+// IMPORTANT ordering requirement: Capture must run AFTER SavestateSerializer_RPL has finished
+// any in-flight allocator work, so that everything written into guest RAM is captured here.
 namespace SavestateSerializer_MMU
 {
-	void DoState(Serializer& s);
+	// Emulation must be paused (the barrier is held).
+	SavestateBuffer Capture();
+
+	// Emulation must be paused (the barrier is held). Throws on malformed data.
+	void Restore(const SavestateBuffer& section);
 }

@@ -20,6 +20,7 @@ namespace SavestateUI
 		case R::RefusedThreadInOSWaitCond: return "Savestate refused: a thread is in a condition wait, try again";
 		case R::RefusedAlarmCallbackRunning: return "Savestate refused: an alarm callback is running, try again";
 		case R::RefusedIOSUBusy: return "Savestate refused: the game is accessing files right now, try again";
+		case R::RefusedGPUBusy: return "Savestate refused: the GPU is busy right now, try again";
 		case R::FileError: return "Savestate: file error (missing or unreadable)";
 		case R::IncompatibleFile: return "Savestate: file is corrupted or made with another build/settings";
 		case R::WrongTitle: return "Savestate: this file belongs to another game";

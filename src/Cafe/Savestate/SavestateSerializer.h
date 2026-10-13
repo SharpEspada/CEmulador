@@ -23,13 +23,8 @@
 // save and load code paths (there is only one path).
 
 #include "Cafe/HW/MMU/MMU.h" // MPTR, MEMPTR<T>
-
-enum class SerializerMode
-{
-	Measure,	// dry run: only accumulates m_size, touches no memory
-	Write,		// writes into m_buffer at m_pos
-	Read,		// reads from m_buffer at m_pos
-};
+#include <memory>
+#include <stdexcept>
 
 // Thrown when DoMarker() detects the read stream has desynced from
 // what the writer produced - almost always means a DoState() function
@@ -47,6 +42,13 @@ public:
 	const char* what() const noexcept override { return m_message.c_str(); }
 private:
 	std::string m_message;
+};
+
+enum class SerializerMode
+{
+	Measure,	// dry run: only accumulates m_size, touches no memory
+	Write,		// writes into m_buffer at m_pos
+	Read,		// reads from m_buffer at m_pos
 };
 
 class Serializer
@@ -87,7 +89,8 @@ public:
 			m_size += size;
 			return;
 		}
-		cemu_assert_debug(m_pos + size <= m_bufferSize);
+		if (m_pos + size > m_bufferSize)
+			throw std::runtime_error("Savestate data is truncated or inconsistent");
 		if (m_mode == SerializerMode::Write)
 			memcpy(m_buffer + m_pos, data, size);
 		else // Read
@@ -214,6 +217,28 @@ private:
 	size_t m_size = 0; // only meaningful in Measure mode
 };
 
+// Large byte buffer that is NOT zero-initialized on allocation (a std::vector would
+// touch every byte; for multi-hundred-MB memory snapshots that costs a lot of time).
+struct SavestateBuffer
+{
+	std::unique_ptr<uint8[]> data;
+	size_t size = 0;
+
+	static SavestateBuffer Allocate(size_t size)
+	{
+		SavestateBuffer b;
+		b.data.reset(new uint8[size ? size : 1]);
+		b.size = size;
+		return b;
+	}
+	static SavestateBuffer CopyOf(const std::vector<uint8>& v)
+	{
+		SavestateBuffer b = Allocate(v.size());
+		if (!v.empty())
+			memcpy(b.data.get(), v.data(), v.size());
+		return b;
+	}
+};
 
 // Helper: runs a DoState-style function twice (measure, then write)
 // into a freshly allocated buffer. Returns the buffer plus its size.
@@ -231,6 +256,14 @@ std::vector<uint8> Savestate_SerializeSection(TDoStateFunc&& doStateFunc)
 	doStateFunc(writer);
 	cemu_assert_debug(writer.GetCurrentPosition() == buffer.size());
 	return buffer;
+}
+
+template <typename TDoStateFunc>
+void Savestate_DeserializeSection(const SavestateBuffer& buffer, TDoStateFunc&& doStateFunc)
+{
+	Serializer reader(SerializerMode::Read);
+	reader.SetBuffer(buffer.data.get(), buffer.size);
+	doStateFunc(reader);
 }
 
 template <typename TDoStateFunc>
