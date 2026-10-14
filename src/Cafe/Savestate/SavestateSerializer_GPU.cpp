@@ -1,6 +1,12 @@
 #include "Cafe/Savestate/SavestateSerializer_GPU.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
-#include <chrono>
+#include "util/highresolutiontimer/HighResolutionTimer.h"
+
+namespace TCL
+{
+	uint64 Savestate_GetRetireMarker();
+	void Savestate_SetRetireMarker(uint64 value);
+}
 
 namespace SavestateSerializer_GPU
 {
@@ -24,6 +30,10 @@ namespace SavestateSerializer_GPU
 		// Rebased relative to timer_bootUp rather than stored absolute -
 		// see DoState() below for why.
 		sint64 vsyncDeltaFromBootUp;
+
+		// TCL::s_currentRetireMarker (host side). The guest holds timestamps derived from it and waits for
+		// gpuRetireMarker >= timestamp, so both must stay on the same timeline after a load.
+		uint64 tclRetireMarker;
 
 		MPTR sharedAreaAddr; // sharedArea* pointer recomputed from this, never stored raw
 		uint32 gx2InitCalled;
@@ -95,6 +105,7 @@ namespace SavestateSerializer_GPU
 			// a different run (or different machine).
 			record.vsyncDeltaFromBootUp = (sint64)(LatteGPUState.timer_nextVSync - LatteGPUState.timer_bootUp);
 
+			record.tclRetireMarker = TCL::Savestate_GetRetireMarker();
 			record.sharedAreaAddr = LatteGPUState.sharedAreaAddr;
 			record.gx2InitCalled = LatteGPUState.gx2InitCalled;
 			record.isDRCPrimary = LatteGPUState.isDRCPrimary;
@@ -133,10 +144,13 @@ namespace SavestateSerializer_GPU
 		// timer_frequency is a host HPC property (ticks per second),
 		// not game state - leave whatever the current process already
 		// initialized it to. Only rebase bootUp/nextVSync.
-		uint64 newBootUp = (uint64)std::chrono::high_resolution_clock::now().time_since_epoch().count();
+		// same clock (QueryPerformanceCounter / clock_gettime ticks) that LatteTiming.cpp uses; a different
+		// clock here (e.g. std::chrono, nanoseconds) puts the next vsync far in the future and freezes the game
+		uint64 newBootUp = HighResolutionTimer::now().getTick();
 		LatteGPUState.timer_bootUp = newBootUp;
 		LatteGPUState.timer_nextVSync = newBootUp + (uint64)record.vsyncDeltaFromBootUp;
 
+		TCL::Savestate_SetRetireMarker(record.tclRetireMarker);
 		LatteGPUState.sharedAreaAddr = record.sharedAreaAddr;
 		LatteGPUState.sharedArea = (gx2GPUSharedArea_t*)memory_getPointerFromVirtualOffsetAllowNull(record.sharedAreaAddr);
 		LatteGPUState.gx2InitCalled = record.gx2InitCalled;

@@ -138,7 +138,7 @@ public:
 		uint32 raw = memPtr.GetMPTR();
 		DoPOD(raw);
 		if (IsReading())
-			memPtr.SetMPTR(raw);
+			memPtr = MEMPTR<T>(raw);
 	}
 
 	// std::vector of POD elements: length-prefixed.

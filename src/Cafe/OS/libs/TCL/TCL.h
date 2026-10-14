@@ -22,6 +22,10 @@ namespace TCL
 	bool TCLGPUReadRBWord(uint32& cmdWord);
 	void TCLGPUNotifyNewRetirementTimestamp();
 
+	// savestate support: the CPU-side retire marker counter is host memory (not in the RAM dump)
+	uint64 Savestate_GetRetireMarker();
+	void Savestate_SetRetireMarker(uint64 value);
+
 	COSModule* GetModule();
 }
 ENABLE_BITMASK_OPERATORS(TCL::TCLSubmissionFlag);

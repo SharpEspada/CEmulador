@@ -1,5 +1,6 @@
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 #include "util/helpers/fspinlock.h"
+#include "Cafe/Savestate/SavestateSerializer.h"
 
 struct CoreinitAsyncCallback
 {
@@ -28,6 +29,51 @@ struct CoreinitAsyncCallback
 		cb->doCall();
 		s_asyncCallbackSpinlock.lock();
 		releaseToPool(cb);
+		s_asyncCallbackSpinlock.unlock();
+	}
+
+	// Savestate support: the queue of pending callbacks is host memory; the semaphore counting
+	// them is guest memory. Both have to describe the same moment.
+	static void savestateDoState(Serializer& s)
+	{
+		s_asyncCallbackSpinlock.lock();
+		s.DoMarker("coreinitAsyncCb");
+		if (!s.IsReading())
+		{
+			uint32 count = (uint32)s_asyncCallbackQueue.size();
+			s.DoPOD(count);
+			for (CoreinitAsyncCallback* cb : s_asyncCallbackQueue)
+			{
+				s.DoPOD(cb->m_functionMPTR);
+				s.DoPOD(cb->m_numParameters);
+				s.DoPODArray(cb->m_gprParam, 9);
+			}
+			s_asyncCallbackSpinlock.unlock();
+			return;
+		}
+		uint32 count = 0;
+		s.DoPOD(count);
+		if (count > 100000)
+		{
+			s_asyncCallbackSpinlock.unlock();
+			throw std::runtime_error("Savestate: invalid callback queue");
+		}
+		// drop whatever is queued right now
+		for (CoreinitAsyncCallback* cb : s_asyncCallbackQueue)
+			releaseToPool(cb);
+		s_asyncCallbackQueue.clear();
+		for (uint32 i = 0; i < count; i++)
+		{
+			MPTR fn = 0;
+			sint32 numParameters = 0;
+			uint32 gpr[9] = {};
+			s.DoPOD(fn);
+			s.DoPOD(numParameters);
+			s.DoPODArray(gpr, 9);
+			CoreinitAsyncCallback* cb = allocateAndInitFromPool(fn, (uint32)numParameters, gpr[0], gpr[1], gpr[2], gpr[3], gpr[4], gpr[5], gpr[6], gpr[7]);
+			cb->m_gprParam[8] = gpr[8];
+			s_asyncCallbackQueue.emplace_back(cb);
+		}
 		s_asyncCallbackSpinlock.unlock();
 	}
 
@@ -113,4 +159,9 @@ void InitializeAsyncCallback()
 
 	strcpy(_g_coreinitCBThreadName.GetPtr(), "Callback Thread");
 	coreinit::OSSetThreadName(g_coreinitCallbackThread.GetPtr(), _g_coreinitCBThreadName.GetPtr());
+}
+
+void Savestate_DoHostState_AsyncCallbacks(Serializer& s)
+{
+	CoreinitAsyncCallback::savestateDoState(s);
 }

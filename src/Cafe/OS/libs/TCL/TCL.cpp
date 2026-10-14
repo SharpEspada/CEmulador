@@ -16,6 +16,16 @@ namespace TCL
 
 	SysAllocator<TCLStatePPC> s_tclStatePPC;
 
+	uint64 Savestate_GetRetireMarker()
+	{
+		return s_currentRetireMarker;
+	}
+
+	void Savestate_SetRetireMarker(uint64 value)
+	{
+		s_currentRetireMarker = value;
+	}
+
 	// called from GPU for timestamp EOP event
 	void TCLGPUNotifyNewRetirementTimestamp()
 	{

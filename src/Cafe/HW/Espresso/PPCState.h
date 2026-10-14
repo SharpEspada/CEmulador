@@ -258,6 +258,10 @@ void PPCCore_switchToScheduler();
 void PPCCore_switchToSchedulerWithLock();
 
 PPCInterpreter_t* PPCCore_executeCallbackInternal(uint32 functionMPTR);
+// Savestate support: number of nested guest callbacks (HLE -> guest code) the given CPU instance is currently inside.
+// A thread that is parked inside such a callback owns host stack frames that cannot be saved.
+sint32 PPCCore_savestateGetCallbackDepth(PPCInterpreter_t* hCPU);
+void PPCCore_savestateForgetCallbackDepth(PPCInterpreter_t* hCPU);
 void PPCCore_init();
 
 // LLE scheduler

@@ -17,7 +17,7 @@
 
 // bump this any time SavestateFormat.h or any DoState() layout changes
 // in a way that is not backwards compatible
-#define SAVESTATE_COMPAT_BREAK_VERSION 4
+#define SAVESTATE_COMPAT_BREAK_VERSION 5
 
 enum class SavestateSectionId : uint32
 {
@@ -31,6 +31,7 @@ enum class SavestateSectionId : uint32
 	ALARM		= 6,
 	GPU			= 7,
 	IOSU		= 8,
+	HOSTSTATE	= 9,
 	// New sections must be appended at the end. Never reuse or reorder
 	// existing ids - old savestates (within the same compat version)
 	// must keep resolving to the same section.

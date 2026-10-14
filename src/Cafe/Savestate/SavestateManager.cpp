@@ -9,6 +9,7 @@
 #include "Cafe/Savestate/SavestateSerializer_Alarm.h"
 #include "Cafe/Savestate/SavestateSerializer_GPU.h"
 #include "Cafe/Savestate/SavestateSerializer_IOSU.h"
+#include "Cafe/Savestate/SavestateSerializer_HostState.h"
 #include "Cafe/Savestate/SavestateSlots.h"
 #include "Cafe/CafeSystem.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
@@ -92,7 +93,7 @@ namespace SavestateManager
 
 	struct SectionBuffers
 	{
-		SavestateBuffer rpl, mmu, iosu, gpu, sync, thread, alarm;
+		SavestateBuffer rpl, mmu, iosu, gpu, sync, thread, alarm, hostState;
 	};
 
 	static Result DoSave(const std::filesystem::path& path)
@@ -124,7 +125,7 @@ namespace SavestateManager
 			barrier.ResumeAll();
 			return Result::RefusedGPUBusy;
 		}
-		if (!SavestateSerializer_Alarm::CanSafelySave())
+		if (!SavestateSerializer_Alarm::CanSafelySave() || coreinit::Savestate_WasCallbackNestedAtStop())
 		{
 			barrier.ResumeAll();
 			return Result::RefusedAlarmCallbackRunning;
@@ -154,6 +155,8 @@ namespace SavestateManager
 
 			writer.AddSection(SavestateSectionId::IOSU,
 				Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_IOSU::DoState_Save(s); }));
+			writer.AddSection(SavestateSectionId::HOSTSTATE,
+				Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_HostState::DoState(s); }));
 			writer.AddSection(SavestateSectionId::SYNC,
 				Savestate_SerializeSection([](Serializer& s) { SavestateSerializer_Sync::DoState(s); }));
 			writer.AddSection(SavestateSectionId::THREAD,
@@ -219,6 +222,7 @@ namespace SavestateManager
 			sec.sync = reader.GetSection(SavestateSectionId::SYNC);
 			sec.thread = reader.GetSection(SavestateSectionId::THREAD);
 			sec.alarm = reader.GetSection(SavestateSectionId::ALARM);
+			sec.hostState = reader.GetSection(SavestateSectionId::HOSTSTATE);
 		}
 		catch (const std::exception&)
 		{
@@ -256,6 +260,9 @@ namespace SavestateManager
 			tSection = Clock::now();
 			Savestate_DeserializeSection(sec.iosu, [](Serializer& s) { SavestateSerializer_IOSU::DoState_Load(s); });
 			Trace(fmt::format("load: IOSU/file handles restored ({} ms)", MsSince(tSection)));
+
+			Savestate_DeserializeSection(sec.hostState, [](Serializer& s) { SavestateSerializer_HostState::DoState(s); });
+			Trace("load: HLE host state restored");
 
 			tSection = Clock::now();
 			Savestate_DeserializeSection(sec.gpu, [](Serializer& s) { SavestateSerializer_GPU::DoState(s); });

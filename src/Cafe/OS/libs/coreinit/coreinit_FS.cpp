@@ -1,3 +1,4 @@
+#include "Cafe/Savestate/SavestateSerializer.h"
 #include <OS/RPL/rpl.h>
 #include "config/ActiveSettings.h"
 #include "Cafe/OS/libs/coreinit/coreinit_SystemInfo.h"
@@ -381,6 +382,24 @@ namespace coreinit
 	/* FS command queue */
 
 	Semaphore g_semaphoreQueuedCmds;
+
+	// Savestate support: head of the registered client list is a host variable pointing into guest memory
+	void Savestate_DoHostState_FS(Serializer& s)
+	{
+		s.DoMarker("coreinitFS");
+		MPTR head = MEMPTR<FSClientBody_t>(g_fsRegisteredClientBodies).GetMPTR();
+		s.DoPOD(head);
+		bool initialized = sFSInitialized;
+		bool shutdown = sFSShutdown;
+		s.DoPOD(initialized);
+		s.DoPOD(shutdown);
+		if (s.IsReading())
+		{
+			g_fsRegisteredClientBodies = MEMPTR<FSClientBody_t>(head).GetPtr();
+			sFSInitialized = initialized;
+			sFSShutdown = shutdown;
+		}
+	}
 
 	void __FSQueueCmdByPriority(FSCmdQueue* fsCmdQueueBE, FSCmdBlockBody* fsCmdBlockBody, bool stopAtEqualPriority)
 	{

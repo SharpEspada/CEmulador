@@ -96,6 +96,12 @@ namespace coreinit
 
 	std::unordered_map<OSThread_t*, OSHostThread*> s_threadToFiber;
 
+	bool g_savestateCallbackNestedAtStop = false;
+	bool Savestate_WasCallbackNestedAtStop()
+	{
+		return g_savestateCallbackNestedAtStop;
+	}
+
 	bool __CemuIsMulticoreMode()
 	{
 		return g_isMulticoreMode;
@@ -109,6 +115,7 @@ namespace coreinit
 		cemu_assert_debug(s_threadToFiber.find(thread) == s_threadToFiber.end());
 
 		OSHostThread* hostThread = new OSHostThread(thread);
+		PPCCore_savestateForgetCallbackDepth(&hostThread->ppcInstance); // address may have been used by a dead thread
 		s_threadToFiber.emplace(thread, hostThread);
 	}
 
@@ -1532,6 +1539,17 @@ namespace coreinit
 			g_schedulerThreadIds.clear();
 		}
 #endif
+		// Savestate support: remember whether any guest thread is parked inside a nested guest callback
+		// (HLE function that called back into guest code). Must be evaluated before the fibers are deleted.
+		{
+			bool nested = false;
+			for (auto& it : s_threadToFiber)
+			{
+				if (PPCCore_savestateGetCallbackDepth(&it.second->ppcInstance) > 0)
+					nested = true;
+			}
+			g_savestateCallbackNestedAtStop = nested;
+		}
 		// clean up all fibers
 		for (auto& it : g_idleLoopFiber)
 		{

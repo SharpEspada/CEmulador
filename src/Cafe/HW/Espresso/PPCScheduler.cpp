@@ -58,10 +58,30 @@ void _PPCCore_callbackExit(PPCInterpreter_t* hCPU)
 	hCPU->instructionPointer = 0;
 }
 
+static std::mutex s_callbackDepthMutex;
+static std::unordered_map<PPCInterpreter_t*, sint32> s_callbackDepth;
+
+sint32 PPCCore_savestateGetCallbackDepth(PPCInterpreter_t* hCPU)
+{
+	std::lock_guard lock(s_callbackDepthMutex);
+	auto it = s_callbackDepth.find(hCPU);
+	return it == s_callbackDepth.end() ? 0 : it->second;
+}
+
+void PPCCore_savestateForgetCallbackDepth(PPCInterpreter_t* hCPU)
+{
+	std::lock_guard lock(s_callbackDepthMutex);
+	s_callbackDepth.erase(hCPU);
+}
+
 PPCInterpreter_t* PPCCore_executeCallbackInternal(uint32 functionMPTR)
 {
 	cemu_assert_debug(functionMPTR != 0);
 	PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
+	{
+		std::lock_guard lock(s_callbackDepthMutex);
+		s_callbackDepth[hCPU]++;
+	}
 	// remember LR and instruction pointer
 	uint32 lr = hCPU->spr.LR;
 	uint32 ip = hCPU->instructionPointer;
@@ -100,6 +120,12 @@ PPCInterpreter_t* PPCCore_executeCallbackInternal(uint32 functionMPTR)
 	// restore LR and instruction pointer
 	hCPU->spr.LR = lr;
 	hCPU->instructionPointer = ip;
+	{
+		std::lock_guard lock(s_callbackDepthMutex);
+		auto it = s_callbackDepth.find(hCPU);
+		if (it != s_callbackDepth.end() && --it->second <= 0)
+			s_callbackDepth.erase(it);
+	}
 	return hCPU;
 }
 

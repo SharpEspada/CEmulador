@@ -1,3 +1,4 @@
+#include "Cafe/Savestate/SavestateSerializer.h"
 #include "Cafe/OS/common/OSCommon.h"
 #include "util/MemMapper/MemMapper.h"
 
@@ -24,6 +25,39 @@ namespace coreinit
 	};
 
 	std::vector<OSVirtMemoryEntry> s_allocatedVirtMemory;
+
+	// Savestate support: host-side bookkeeping of OSAllocVirtAddr() ranges
+	void Savestate_DoHostState_VirtMem(Serializer& s)
+	{
+		std::lock_guard _l(s_memMappingMtx);
+		s.DoMarker("coreinitVirtMem");
+		uint32 count = (uint32)s_allocatedVirtMemory.size();
+		s.DoPOD(count);
+		if (s.IsReading())
+		{
+			if (count > 100000)
+				throw std::runtime_error("Savestate: invalid virtual memory table");
+			s_allocatedVirtMemory.clear();
+			for (uint32 i = 0; i < count; i++)
+			{
+				MPTR virtualAddress = 0;
+				uint32 size = 0, alignment = 0;
+				s.DoPOD(virtualAddress);
+				s.DoPOD(size);
+				s.DoPOD(alignment);
+				s_allocatedVirtMemory.emplace_back(virtualAddress, size, alignment);
+			}
+			return;
+		}
+		for (auto& e : s_allocatedVirtMemory)
+		{
+			MPTR virtualAddress = e.virtualAddress;
+			uint32 size = e.size, alignment = e.alignment;
+			s.DoPOD(virtualAddress);
+			s.DoPOD(size);
+			s.DoPOD(alignment);
+		}
+	}
 
 	MPTR _OSAllocVirtAddr(uint32 size, uint32 alignment)
 	{

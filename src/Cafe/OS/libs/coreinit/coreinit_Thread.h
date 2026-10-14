@@ -648,6 +648,10 @@ namespace coreinit
 	// Recomputes the host-side per-core runnable-thread counters from the guest run queues.
 	// Scheduler lock must be held.
 	void Savestate_ResyncRunQueueCounters();
+
+	// True if, when the scheduler was last stopped (OSSchedulerEnd), some guest thread was parked inside a
+	// nested guest callback. Such a state cannot be saved/restored (host stack frames would be lost).
+	bool Savestate_WasCallbackNestedAtStop();
 }
 
 #pragma pack()

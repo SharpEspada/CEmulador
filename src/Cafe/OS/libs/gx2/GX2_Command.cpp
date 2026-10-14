@@ -1,3 +1,4 @@
+#include "Cafe/Savestate/SavestateSerializer.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/Core/LatteDraw.h"
 #include "Cafe/OS/common/OSCommon.h"
@@ -65,6 +66,32 @@ namespace GX2
 	bool s_cbBufferIsInternallyAllocated;
 
 	void GX2Command_StartNewCommandBuffer(uint32 numU32s);
+
+	// Savestate support: the position each core is currently writing GPU commands to is host state,
+	// the command data itself is in guest RAM. They must be restored together or the GPU gets garbage.
+	static void _SavestateDoCBState(Serializer& s, GX2PerCoreCBState& st)
+	{
+		MPTR bufferPtr = MEMPTR<uint32be>(st.bufferPtr).GetMPTR();
+		MPTR currentWritePtr = MEMPTR<uint32be>(st.currentWritePtr).GetMPTR();
+		s.DoPOD(bufferPtr);
+		s.DoPOD(st.bufferSizeInU32s);
+		s.DoPOD(currentWritePtr);
+		s.DoPOD(st.isDisplayList);
+		if (s.IsReading())
+		{
+			st.bufferPtr = MEMPTR<uint32be>(bufferPtr).GetPtr();
+			st.currentWritePtr = MEMPTR<uint32be>(currentWritePtr).GetPtr();
+		}
+	}
+
+	void Savestate_DoHostState_Command(Serializer& s)
+	{
+		s.DoMarker("gx2Command");
+		for (uint32 i = 0; i < Espresso::CORE_COUNT; i++)
+			_SavestateDoCBState(s, s_perCoreCBState[i]);
+		_SavestateDoCBState(s, s_mainCoreLastCommandState);
+		s.DoPOD(s_cbBufferIsInternallyAllocated);
+	}
 
 	// called from GX2Init. Allocates a 4MB memory chunk from which command buffers are suballocated from
 	void GX2Init_commandBufferPool(void* bufferBase, uint32 bufferSize)

@@ -1,3 +1,4 @@
+#include "Cafe/Savestate/SavestateSerializer.h"
 #include "Cafe/OS/common/OSCommon.h"
 #include "GX2_Command.h"
 #include "GX2_Event.h"
@@ -156,6 +157,35 @@ namespace GX2
 
 	SysAllocator<coreinit::OSSemaphore> s_eventCbQueueSemaphore;
 	ConcurrentQueue<GX2EventQueueEntry> s_eventCbQueue;
+
+	// Savestate support: registered callbacks and the pending-event queue are host state,
+	// the semaphore counting pending events is guest memory.
+	void Savestate_DoHostState_Event(Serializer& s)
+	{
+		s.DoMarker("gx2Event");
+		for (size_t i = 0; i < GX2CallbackEventTypeCount; i++)
+		{
+			s.DoMEMPTR(s_eventCallback[i].callbackFuncPtr);
+			s.DoMEMPTR(s_eventCallback[i].userData);
+		}
+		s.DoPOD(s_callbackThreadLaunched);
+		if (!s.IsReading())
+		{
+			std::vector<uint32> pending;
+			GX2EventQueueEntry entry;
+			while (s_eventCbQueue.peek2(entry))
+				pending.push_back((uint32)entry.eventType);
+			for (uint32 v : pending) // put them back, nothing is consumed by saving
+				s_eventCbQueue.push(GX2EventQueueEntry((GX2CallbackEventType)v));
+			s.DoVector(pending);
+			return;
+		}
+		std::vector<uint32> pending;
+		s.DoVector(pending);
+		s_eventCbQueue.clear();
+		for (uint32 v : pending)
+			s_eventCbQueue.push(GX2EventQueueEntry((GX2CallbackEventType)v));
+	}
 
 	void __GX2NotifyEvent(GX2CallbackEventType eventType)
 	{

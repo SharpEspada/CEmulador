@@ -6,6 +6,7 @@
 #include "Cafe/OS/RPL/rpl.h"
 #include "Cafe/OS/libs/coreinit/coreinit_MEM_FrmHeap.h"
 #include "coreinit_DynLoad.h"
+#include "Cafe/Savestate/SavestateSerializer.h"
 
 // the system area is a block of memory that exists only in the emulator. It is used to simplify dynamic memory allocation for system data
 // this partially overlaps with the system heap from coreinit_SysHeap.cpp -> Use SysHeap for everything
@@ -211,6 +212,52 @@ namespace coreinit
 	}
 
 	std::array<MEMHeapBase*, 9> sHeapBaseHandle{};
+
+
+	// Savestate support: the heap registry lives in host memory (the heaps themselves are in guest RAM)
+	// and has to follow the restored guest memory, otherwise heap create/destroy/lookup after a load
+	// works on a stale list.
+	void Savestate_DoHostState_MEM(Serializer& s)
+	{
+		s.DoMarker("coreinitMEM");
+		sint32 tableCount = g_heapTableCount;
+		s.DoPOD(tableCount);
+		MPTR table[MEM_MAX_HEAP_TABLE] = {};
+		MPTR defaultHeap = 0;
+		MPTR baseHandles[9] = {};
+		if (!s.IsReading())
+		{
+			for (sint32 i = 0; i < MEM_MAX_HEAP_TABLE; i++)
+				table[i] = MEMPTR<MEMHeapBase>(g_heapTable[i]).GetMPTR();
+			defaultHeap = MEMPTR<MEMHeapBase>(gDefaultHeap).GetMPTR();
+			for (size_t i = 0; i < 9; i++)
+				baseHandles[i] = MEMPTR<MEMHeapBase>(sHeapBaseHandle[i]).GetMPTR();
+		}
+		s.DoPODArray(table, MEM_MAX_HEAP_TABLE);
+		s.DoPOD(defaultHeap);
+		s.DoPODArray(baseHandles, 9);
+		bool slockInit = g_slockInitialized;
+		bool listsInit = g_listsInitialized;
+		s.DoPOD(slockInit);
+		s.DoPOD(listsInit);
+		s.DoPOD(g_list1);
+		s.DoPOD(g_list2);
+		s.DoPOD(g_list3);
+		s.DoPOD(gHeapFillValues);
+		if (s.IsReading())
+		{
+			if (tableCount < 0 || tableCount > MEM_MAX_HEAP_TABLE)
+				throw std::runtime_error("Savestate: invalid heap table");
+			g_heapTableCount = tableCount;
+			for (sint32 i = 0; i < MEM_MAX_HEAP_TABLE; i++)
+				g_heapTable[i] = MEMPTR<MEMHeapBase>(table[i]).GetPtr();
+			gDefaultHeap = MEMPTR<MEMHeapBase>(defaultHeap).GetPtr();
+			for (size_t i = 0; i < 9; i++)
+				sHeapBaseHandle[i] = MEMPTR<MEMHeapBase>(baseHandles[i]).GetPtr();
+			g_slockInitialized = slockInit;
+			g_listsInitialized = listsInit;
+		}
+	}
 
 	MEMHeapBase* MEMGetBaseHeapHandle(uint32 index)
 	{

@@ -193,6 +193,8 @@ add_library(CemuCafe
   Savestate/SavestateSerializer_Alarm.h
   Savestate/SavestateSerializer_GPU.cpp
   Savestate/SavestateSerializer_GPU.h
+  Savestate/SavestateSerializer_HostState.cpp
+  Savestate/SavestateSerializer_HostState.h
   Savestate/SavestateSerializer_IOSU.cpp
   Savestate/SavestateSerializer_IOSU.h
   Savestate/SavestateSerializer_MMU.cpp

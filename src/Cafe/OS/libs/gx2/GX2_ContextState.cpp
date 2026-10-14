@@ -1,3 +1,4 @@
+#include "Cafe/Savestate/SavestateSerializer.h"
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "GX2.h"
@@ -20,6 +21,13 @@
 #define _GX2_CALC_SHADOWMEM_NUM_U32(__v) (((((__v)*4)+0xFF)&~0xFF)/4)
 
 MPTR gx2CurrentContextStateMPTR = MPTR_NULL;
+
+// Savestate support (host variable pointing into guest memory)
+void Savestate_DoHostState_GX2ContextState(Serializer& s)
+{
+	s.DoMarker("gx2Context");
+	s.DoPOD(gx2CurrentContextStateMPTR);
+}
 
 typedef struct  
 {

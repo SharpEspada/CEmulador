@@ -1,3 +1,4 @@
+#include "Cafe/Savestate/SavestateSerializer.h"
 #include "Cafe/OS/libs/snd_core/ax.h"
 #include "Cafe/OS/libs/snd_core/ax_internal.h"
 #include "Cafe/HW/MMU/MMU.h"
@@ -397,6 +398,16 @@ namespace snd_core
 	/* AX output */
 
 	uint32 numQueuedFramesSndGeneric = 0;
+
+	// Savestate support: "frames queued" and "frames processed" are host counters, the pending frame
+	// message is in guest memory. If they disagree the audio stops for good (a frame is only queued
+	// when both counters are equal).
+	void Savestate_DoHostState_AX(Serializer& s)
+	{
+		s.DoMarker("sndCore");
+		s.DoPOD(numQueuedFramesSndGeneric);
+		s.DoPOD(numProcessedFrames);
+	}
 
 	void AXOut_init()
 	{
