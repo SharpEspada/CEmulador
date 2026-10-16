@@ -12,6 +12,8 @@
 #include "Cafe/Savestate/SavestateSerializer_HostState.h"
 #include "Cafe/Savestate/SavestateSlots.h"
 #include "Cafe/CafeSystem.h"
+#include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
+#include "Cafe/HW/MMU/MMU.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 #include "config/ActiveSettings.h"
 #include "Cafe/HW/Latte/Core/Latte.h" // Latte pause API
@@ -94,7 +96,62 @@ namespace SavestateManager
 	struct SectionBuffers
 	{
 		SavestateBuffer rpl, mmu, iosu, gpu, sync, thread, alarm, hostState;
+
+		void Assign(SavestateSectionId id, SavestateBuffer&& b)
+		{
+			switch (id)
+			{
+			case SavestateSectionId::RPL: rpl = std::move(b); break;
+			case SavestateSectionId::MMU: mmu = std::move(b); break;
+			case SavestateSectionId::IOSU: iosu = std::move(b); break;
+			case SavestateSectionId::GPU: gpu = std::move(b); break;
+			case SavestateSectionId::SYNC: sync = std::move(b); break;
+			case SavestateSectionId::THREAD: thread = std::move(b); break;
+			case SavestateSectionId::ALARM: alarm = std::move(b); break;
+			case SavestateSectionId::HOSTSTATE: hostState = std::move(b); break;
+			default: break;
+			}
+		}
 	};
+
+	// The most recently saved or loaded state is kept (uncompressed) in RAM, like Dolphin does,
+	// so that loading it again does not have to read and decompress the file. It is only used
+	// if the file on disk is still exactly the one it was made from (same size and time stamp).
+	// Only touched while s_busy is held, so no extra locking is needed.
+	struct StateCache
+	{
+		bool valid = false;
+		std::string pathKey;
+		uint64 titleId = 0;
+		uint64 fileSize = 0;
+		std::filesystem::file_time_type fileTime{};
+		SectionBuffers sec;
+	};
+	static StateCache s_cache;
+
+	static std::string PathKey(const std::filesystem::path& p)
+	{
+		std::error_code ec;
+		std::filesystem::path abs = std::filesystem::absolute(p, ec);
+		if (ec)
+			abs = p;
+		auto u8 = abs.generic_u8string();
+		return std::string(u8.begin(), u8.end());
+	}
+
+	static bool GetFileStamp(const std::filesystem::path& p, uint64& sizeOut, std::filesystem::file_time_type& timeOut)
+	{
+		std::error_code ec;
+		auto size = std::filesystem::file_size(p, ec);
+		if (ec)
+			return false;
+		auto t = std::filesystem::last_write_time(p, ec);
+		if (ec)
+			return false;
+		sizeOut = (uint64)size;
+		timeOut = t;
+		return true;
+	}
 
 	static Result DoSave(const std::filesystem::path& path)
 	{
@@ -180,56 +237,31 @@ namespace SavestateManager
 		std::vector<uint8> thumbnail; // TODO: capture a small PNG of the current frame here
 		uint64 titleId = CafeSystem::GetForegroundTitleId();
 		uint16 titleVersion = CafeSystem::GetForegroundTitleVersion();
+		writer.SetKeepRawSections(true);
 		bool ok = writer.WriteToFile(path, titleId, titleVersion, thumbnail);
+		if (ok)
+		{
+			uint64 stampSize = 0;
+			std::filesystem::file_time_type stampTime{};
+			s_cache.valid = false;
+			s_cache.sec = SectionBuffers();
+			if (GetFileStamp(path, stampSize, stampTime))
+			{
+				for (auto& [id, buf] : writer.TakeKeptSections())
+					s_cache.sec.Assign(id, std::move(buf));
+				s_cache.pathKey = PathKey(path);
+				s_cache.titleId = titleId;
+				s_cache.fileSize = stampSize;
+				s_cache.fileTime = stampTime;
+				s_cache.valid = true;
+			}
+		}
 		Trace(fmt::format("save: file written in background ({} ms), total {} ms", MsSince(tWrite), MsSince(tStart)));
 		return ok ? Result::OK : Result::FileError;
 	}
 
-	static Result DoLoad(const std::filesystem::path& path)
+	static Result ApplySections(const SectionBuffers& sec, Clock::time_point tStart)
 	{
-		if (ActiveSettings::IsOnlineEnabled())
-			return Result::RefusedOnlineSession;
-
-		BusyGuard busy;
-		if (!busy.owns)
-			return Result::Busy;
-
-		auto tStart = Clock::now();
-
-		// Everything that does not need the game to be paused is done first, while the
-		// game keeps running: read the file, verify it, decompress all sections.
-		SavestateFile::Reader reader;
-		uint64 expectedTitleId = CafeSystem::GetForegroundTitleId();
-		auto error = reader.OpenAndValidate(path, expectedTitleId);
-		if (error != SavestateFile::LoadError::OK)
-		{
-			switch (error)
-			{
-			case SavestateFile::LoadError::WrongTitle: return Result::WrongTitle;
-			case SavestateFile::LoadError::IncompatibleBuild:
-			case SavestateFile::LoadError::UnsupportedFormatVersion:
-			case SavestateFile::LoadError::BadMagic: return Result::IncompatibleFile;
-			default: return Result::FileError;
-			}
-		}
-		SectionBuffers sec;
-		try
-		{
-			sec.rpl = reader.GetSection(SavestateSectionId::RPL);
-			sec.mmu = reader.GetSection(SavestateSectionId::MMU);
-			sec.iosu = reader.GetSection(SavestateSectionId::IOSU);
-			sec.gpu = reader.GetSection(SavestateSectionId::GPU);
-			sec.sync = reader.GetSection(SavestateSectionId::SYNC);
-			sec.thread = reader.GetSection(SavestateSectionId::THREAD);
-			sec.alarm = reader.GetSection(SavestateSectionId::ALARM);
-			sec.hostState = reader.GetSection(SavestateSectionId::HOSTSTATE);
-		}
-		catch (const std::exception&)
-		{
-			return Result::FileError;
-		}
-		Trace(fmt::format("load: file read and decompressed while the game was still running ({} ms)", MsSince(tStart)));
-
 		Barrier barrier;
 		bool gpuParked = barrier.StopAll();
 		auto tPaused = Clock::now();
@@ -253,7 +285,12 @@ namespace SavestateManager
 			Trace(fmt::format("load: modules checked ({} ms)", MsSince(tSection)));
 
 			tSection = Clock::now();
-			SavestateSerializer_MMU::Restore(sec.mmu);
+			if (SavestateSerializer_MMU::Restore(sec.mmu))
+			{
+				PPCRecompiler_invalidateRange(MEMORY_CODEAREA_ADDR, MEMORY_CODEAREA_ADDR + MEMORY_CODEAREA_SIZE);
+				PPCRecompiler_invalidateRange(MEMORY_CODE_TRAMPOLINE_AREA_ADDR, MEMORY_CODE_TRAMPOLINE_AREA_ADDR + MEMORY_CODE_TRAMPOLINE_AREA_SIZE);
+				Trace("load: code area differed, compiled code dropped");
+			}
 			Trace(fmt::format("load: RAM restored ({} ms)", MsSince(tSection)));
 
 			// IOSU after MMU: it uses the (restored) IPC request pool in guest memory
@@ -294,6 +331,109 @@ namespace SavestateManager
 		return Result::OK;
 	}
 
+	static bool IsTransientRefusal(Result r);
+
+	static const char* RefusalName(Result r)
+	{
+		switch (r)
+		{
+		case Result::RefusedMidModuleLoad: return "a module is being loaded";
+		case Result::RefusedThreadInOSWaitCond: return "a thread is in a condition wait";
+		case Result::RefusedAlarmCallbackRunning: return "a callback is running";
+		case Result::RefusedIOSUBusy: return "a file/IOSU request is in flight";
+		case Result::RefusedGPUBusy: return "the GPU did not become idle in time";
+		default: return "other";
+		}
+	}
+
+	static Result DoLoad(const std::filesystem::path& path)
+	{
+		if (ActiveSettings::IsOnlineEnabled())
+			return Result::RefusedOnlineSession;
+
+		BusyGuard busy;
+		if (!busy.owns)
+			return Result::Busy;
+
+		auto tStart = Clock::now();
+		uint64 expectedTitleId = CafeSystem::GetForegroundTitleId();
+
+		// Fast path: the most recent state that was saved/loaded in this session is still in RAM.
+		SectionBuffers decoded;
+		const SectionBuffers* sections = nullptr;
+		bool fromCache = false;
+		uint64 stampSize = 0;
+		std::filesystem::file_time_type stampTime{};
+		bool haveStamp = GetFileStamp(path, stampSize, stampTime);
+		if (haveStamp && s_cache.valid && s_cache.titleId == expectedTitleId && s_cache.pathKey == PathKey(path) &&
+			s_cache.fileSize == stampSize && s_cache.fileTime == stampTime)
+		{
+			sections = &s_cache.sec;
+			fromCache = true;
+			Trace("load: state found in RAM, no need to read the file");
+		}
+		else
+		{
+			// Everything that does not need the game to be paused is done first, while the
+			// game keeps running: read the file, verify it, decompress all sections. Done ONCE,
+			// even if the pause below has to be retried.
+			SavestateFile::Reader reader;
+			auto error = reader.OpenAndValidate(path, expectedTitleId);
+			if (error != SavestateFile::LoadError::OK)
+			{
+				switch (error)
+				{
+				case SavestateFile::LoadError::WrongTitle: return Result::WrongTitle;
+				case SavestateFile::LoadError::IncompatibleBuild:
+				case SavestateFile::LoadError::UnsupportedFormatVersion:
+				case SavestateFile::LoadError::BadMagic: return Result::IncompatibleFile;
+				default: return Result::FileError;
+				}
+			}
+			Trace(fmt::format("load: file read and verified ({} ms)", MsSince(tStart)));
+			try
+			{
+				decoded.rpl = reader.GetSection(SavestateSectionId::RPL);
+				decoded.mmu = reader.GetSection(SavestateSectionId::MMU);
+				decoded.iosu = reader.GetSection(SavestateSectionId::IOSU);
+				decoded.gpu = reader.GetSection(SavestateSectionId::GPU);
+				decoded.sync = reader.GetSection(SavestateSectionId::SYNC);
+				decoded.thread = reader.GetSection(SavestateSectionId::THREAD);
+				decoded.alarm = reader.GetSection(SavestateSectionId::ALARM);
+				decoded.hostState = reader.GetSection(SavestateSectionId::HOSTSTATE);
+			}
+			catch (const std::exception&)
+			{
+				return Result::FileError;
+			}
+			Trace(fmt::format("load: decompressed while the game was still running ({} ms)", MsSince(tStart)));
+			sections = &decoded;
+		}
+
+		Result result = Result::OK;
+		for (int attempt = 0; attempt < 60; attempt++)
+		{
+			result = ApplySections(*sections, tStart);
+			if (!IsTransientRefusal(result))
+				break;
+			Trace(fmt::format("load: not possible right now ({}), trying again (attempt {})", RefusalName(result), attempt + 1));
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		}
+
+		if (result == Result::OK && !fromCache && haveStamp)
+		{
+			// keep this state in RAM: loading it again will be almost instant
+			s_cache.valid = false;
+			s_cache.sec = std::move(decoded);
+			s_cache.pathKey = PathKey(path);
+			s_cache.titleId = expectedTitleId;
+			s_cache.fileSize = stampSize;
+			s_cache.fileTime = stampTime;
+			s_cache.valid = true;
+		}
+		return result;
+	}
+
 	// ------------------------------------------------------------------
 	// Public API
 	// ------------------------------------------------------------------
@@ -322,6 +462,6 @@ namespace SavestateManager
 
 	Result RequestSave(int slotIndex) { return RunWithRetry([&]() { return DoSave(SavestateSlots::GetSlotPath(slotIndex)); }); }
 	Result RequestSaveToFile(const std::filesystem::path& path) { return RunWithRetry([&]() { return DoSave(path); }); }
-	Result RequestLoad(int slotIndex) { return RunWithRetry([&]() { return DoLoad(SavestateSlots::GetSlotPath(slotIndex)); }); }
-	Result RequestLoadFromFile(const std::filesystem::path& path) { return RunWithRetry([&]() { return DoLoad(path); }); }
+	Result RequestLoad(int slotIndex) { return DoLoad(SavestateSlots::GetSlotPath(slotIndex)); }
+	Result RequestLoadFromFile(const std::filesystem::path& path) { return DoLoad(path); }
 }

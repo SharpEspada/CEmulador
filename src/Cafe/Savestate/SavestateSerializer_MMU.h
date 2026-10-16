@@ -21,5 +21,7 @@ namespace SavestateSerializer_MMU
 	SavestateBuffer Capture();
 
 	// Emulation must be paused (the barrier is held). Throws on malformed data.
-	void Restore(const SavestateBuffer& section);
+	// Returns true if the content of any code area (main code, trampolines, code cave) was different
+	// from the saved one, i.e. if compiled (JIT) code has to be thrown away. Usually false.
+	bool Restore(const SavestateBuffer& section);
 }

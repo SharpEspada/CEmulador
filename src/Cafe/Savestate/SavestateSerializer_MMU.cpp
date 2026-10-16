@@ -172,7 +172,7 @@ namespace SavestateSerializer_MMU
 		return out;
 	}
 
-	void Restore(const SavestateBuffer& section)
+	bool Restore(const SavestateBuffer& section)
 	{
 		const uint8* base = section.data.get();
 		const uint64 totalSize = section.size;
@@ -273,18 +273,36 @@ namespace SavestateSerializer_MMU
 			fail("MMU:badSize");
 
 		// 2) restore, in parallel. Blocks that are zero both in the file and in live memory are left alone
+		std::atomic<bool> codeChanged{ false };
 		SavestateParallel::For(tasks.size(), [&](size_t i)
 		{
 			Target& t = targets[tasks[i].rangeIndex];
+			const MMU_MEM_AREA_ID areaId = t.range->areaId;
+			const bool isCodeArea = areaId == MMU_MEM_AREA_ID::CODE_LOW0 || areaId == MMU_MEM_AREA_ID::CODE_TRAMPOLINE ||
+									areaId == MMU_MEM_AREA_ID::CODE_CAVE || areaId == MMU_MEM_AREA_ID::CODE_MAIN;
 			uint32 b = tasks[i].blockIndex;
 			uint64 len = std::min<uint64>(BLOCK_SIZE, (uint64)t.rec->size - (uint64)b * BLOCK_SIZE);
 			uint8* live = t.range->getPtr() + (uint64)b * BLOCK_SIZE;
 			if (t.blockOffset[b] != ~0ull)
-				memcpy(live, base + t.blockOffset[b], (size_t)len);
+			{
+				const uint8* saved = base + t.blockOffset[b];
+				// only write blocks that really differ (less memory traffic, and tells us whether code changed)
+				if (memcmp(live, saved, (size_t)len) != 0)
+				{
+					memcpy(live, saved, (size_t)len);
+					if (isCodeArea)
+						codeChanged = true;
+				}
+			}
 			else if (!IsZeroBlock(live, (size_t)len))
+			{
 				memset(live, 0, (size_t)len);
+				if (isCodeArea)
+					codeChanged = true;
+			}
 		});
 
 		sysAreaAllocatorOffset = header.sysAreaOffset;
+		return codeChanged.load();
 	}
 }

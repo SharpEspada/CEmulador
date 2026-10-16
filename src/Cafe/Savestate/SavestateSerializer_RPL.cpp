@@ -606,8 +606,8 @@ namespace SavestateSerializer_RPL
 		// Mandatory: guest memory contents just changed underneath any
 		// previously compiled code, regardless of how much of the reload
 		// above matched the old layout exactly.
-		PPCRecompiler_invalidateRange(MEMORY_CODEAREA_ADDR, MEMORY_CODEAREA_ADDR + MEMORY_CODEAREA_SIZE);
-		PPCRecompiler_invalidateRange(MEMORY_CODE_TRAMPOLINE_AREA_ADDR, MEMORY_CODE_TRAMPOLINE_AREA_ADDR + MEMORY_CODE_TRAMPOLINE_AREA_SIZE);
+		// (done by SavestateManager after the RAM restore, and only if a code area really changed:
+		// throwing away all compiled code on every load makes the game crawl for a while afterwards)
 	}
 
 }

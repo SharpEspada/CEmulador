@@ -93,7 +93,7 @@ namespace SavestateFile
 	};
 
 	// Compresses a section into independent blocks, in parallel.
-	static void CompressSection(StoredSection& st)
+	static void CompressSection(StoredSection& st, bool keepRaw)
 	{
 		const uint64 blockRaw = SAVESTATE_COMPRESSION_BLOCK_SIZE;
 		uint64 blockCount = (st.rawSize + blockRaw - 1) / blockRaw;
@@ -133,7 +133,8 @@ namespace SavestateFile
 		st.head = std::move(head);
 		st.blocks = std::move(blocks);
 		st.compression = SAVESTATE_COMPRESSION_ZSTD_BLOCKS;
-		st.raw = SavestateBuffer(); // release the raw bytes early
+		if (!keepRaw)
+			st.raw = SavestateBuffer(); // release the raw bytes early
 	}
 
 	// ------------------------------------------------------------------
@@ -174,7 +175,7 @@ namespace SavestateFile
 				st.rawSize = section.raw.size;
 				st.raw = std::move(section.raw);
 				if (st.rawSize >= 4096)
-					CompressSection(st);
+					CompressSection(st, m_keepRaw);
 				stored.push_back(std::move(st));
 			}
 			m_sections.clear();
@@ -258,6 +259,11 @@ namespace SavestateFile
 			{
 				fs::remove(tmpPath, ec);
 				return false;
+			}
+			if (m_keepRaw)
+			{
+				for (auto& section : stored)
+					m_kept.emplace_back(section.id, std::move(section.raw));
 			}
 			return true;
 		}

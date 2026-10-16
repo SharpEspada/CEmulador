@@ -6,6 +6,7 @@ void LatteSHRC_Init();
 void LatteSHRC_UnloadAll();
 
 void LatteSHRC_ResetCachedShaderHash();
+void LatteSHRC_InvalidateAddressCachesForSavestate();
 LatteFetchShader* LatteSHRC_GetOrCreateFetchShader();
 
 void LatteSHRC_UpdateActiveShaders();

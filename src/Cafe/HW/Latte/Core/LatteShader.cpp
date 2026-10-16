@@ -1108,6 +1108,22 @@ void LatteSHRC_RemoveShaderStateCacheEntryByKey(uint64 key)
 	--g_shaderStateCacheSetCount;
 }
 
+// Savestate support: the shader state cache maps (shader memory address, size, registers) -> compiled shaders.
+// After a savestate load the guest memory behind these addresses is different, so every entry is stale.
+// Compiled shaders themselves are kept (they are looked up by a hash of their code, so no recompilation happens).
+void LatteSHRC_InvalidateAddressCachesForSavestate()
+{
+	std::vector<uint64> keys;
+	keys.reserve(s_shaderStateCache.size());
+	for (auto& it : s_shaderStateCache)
+		keys.emplace_back(it.first);
+	for (uint64 key : keys)
+		LatteSHRC_RemoveShaderStateCacheEntryByKey(key);
+	s_shaderStateCacheKeys.clear();
+	s_shaderStateCacheCleanupIndex = 0;
+	LatteSHRC_ResetCachedShaderHash();
+}
+
 void LatteSHRC_CleanupShaderStateCache()
 {
 	constexpr uint32 NUM_FRAMES_UNTIL_EXPIRE = 5 * 60; // entries expire after not being used for 5 seconds at 60 FPS

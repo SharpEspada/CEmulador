@@ -33,6 +33,11 @@ namespace SavestateFile
 		bool WriteToFile(const std::filesystem::path& path, uint64 titleId, uint16 titleVersion,
 			const std::vector<uint8>& thumbnailPng);
 
+		// If enabled, the uncompressed section data is not freed after writing but can be taken with
+		// TakeKeptSections() (used to keep the most recent state in RAM for instant loading).
+		void SetKeepRawSections(bool keep) { m_keepRaw = keep; }
+		std::vector<std::pair<SavestateSectionId, SavestateBuffer>> TakeKeptSections() { return std::move(m_kept); }
+
 	private:
 		struct PendingSection
 		{
@@ -40,6 +45,8 @@ namespace SavestateFile
 			SavestateBuffer raw;
 		};
 		std::vector<PendingSection> m_sections;
+		bool m_keepRaw = false;
+		std::vector<std::pair<SavestateSectionId, SavestateBuffer>> m_kept;
 	};
 
 	class Reader

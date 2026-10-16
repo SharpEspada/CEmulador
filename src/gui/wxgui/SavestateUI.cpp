@@ -29,13 +29,15 @@ namespace SavestateUI
 	}
 
 	template<typename Fn>
-	static void RunAsync(Fn fn, std::string successText)
+	static void RunAsync(Fn fn, std::string successText, std::string startText = std::string())
 	{
 		if (!CafeSystem::IsTitleRunning())
 		{
 			LatteOverlay_pushNotification("Savestate: no game is running", 2500);
 			return;
 		}
+		if (!startText.empty())
+			LatteOverlay_pushNotification(startText, 1500);
 		std::thread([fn = std::move(fn), successText = std::move(successText)]() {
 			SavestateManager::Result result;
 			try
@@ -62,7 +64,7 @@ namespace SavestateUI
 
 	void LoadFromSlot(int slotIndex)
 	{
-		RunAsync([slotIndex]() { return SavestateManager::RequestLoad(slotIndex); }, "Loaded state from slot " + std::to_string(slotIndex));
+		RunAsync([slotIndex]() { return SavestateManager::RequestLoad(slotIndex); }, "Loaded state from slot " + std::to_string(slotIndex), "Loading state...");
 	}
 
 	void SaveToFile(const std::filesystem::path& path)
@@ -72,7 +74,7 @@ namespace SavestateUI
 
 	void LoadFromFile(const std::filesystem::path& path)
 	{
-		RunAsync([path]() { return SavestateManager::RequestLoadFromFile(path); }, "Savestate imported");
+		RunAsync([path]() { return SavestateManager::RequestLoadFromFile(path); }, "Savestate imported", "Loading state...");
 	}
 
 	std::string GetSlotLabel(int slotIndex)

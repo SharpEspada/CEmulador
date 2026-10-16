@@ -134,11 +134,9 @@ namespace SavestateSerializer_GPU
 		memcpy(LatteGPUState.contextRegisterShadowAddr, record.contextRegisterShadowAddr, sizeof(record.contextRegisterShadowAddr));
 		LatteGPUState.contextControl0 = record.contextControl0;
 		LatteGPUState.contextControl1 = record.contextControl1;
-		LatteGPUState.frameCounter = record.frameCounter;
-		LatteGPUState.flipCounter = record.flipCounter;
-		LatteGPUState.currentDrawCallTick = record.currentDrawCallTick;
-		LatteGPUState.drawCallCounter = record.drawCallCounter;
-		LatteGPUState.textureBindCounter = record.textureBindCounter;
+		// frameCounter / flipCounter / currentDrawCallTick / drawCallCounter / textureBindCounter are host-side
+		// statistics used to age the GPU caches. They are deliberately NOT restored: they must keep increasing
+		// monotonically, otherwise cache entries stamped with the "future" would never expire or look in use.
 		LatteGPUState.flipRequestCount = record.flipRequestCount;
 
 		// timer_frequency is a host HPC property (ticks per second),

@@ -9,6 +9,7 @@
 #include "WindowSystem.h"
 
 #include "Cafe/HW/Latte/Core/LatteBufferCache.h"
+#include "Cafe/HW/Latte/Core/LatteIndices.h"
 
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
@@ -84,8 +85,14 @@ void Latte_RunPendingCacheInvalidationIfRequested()
 {
 	if (!sLatteCacheInvalidationRequested.load(std::memory_order_acquire))
 		return;
+	// Everything the GPU side cached from guest memory is stale now (the RAM was replaced behind its back,
+	// without the dcbf notifications the game would normally have sent).
 	LatteTC_UnloadAllTextures();
 	LatteRenderTarget_unloadAll();
+	LatteBufferCache_invalidate(0, 0xFFFF0000); // vertex/uniform/index buffer cache: mark every range dirty
+	LatteIndices_invalidateAll();
+	LatteSHRC_InvalidateAddressCachesForSavestate(); // address-keyed shader lookups (compiled shaders are kept)
+	LatteGPUState.frameCounter++; // makes every "already looked up this frame" shortcut (e.g. fetch shader cache) revalidate
 	sLatteCacheInvalidationRequested.store(false, std::memory_order_release);
 	sLatteCacheInvalidationDone.store(true, std::memory_order_release);
 }
