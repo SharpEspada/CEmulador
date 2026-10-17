@@ -9,7 +9,6 @@
 #include "WindowSystem.h"
 
 #include "Cafe/HW/Latte/Core/LatteBufferCache.h"
-#include "Cafe/HW/Latte/Core/LatteIndices.h"
 
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
@@ -26,6 +25,7 @@ std::atomic_bool sLatteThreadRunning = false;
 std::atomic_bool sLatteThreadFinishedInit = false;
 
 void LatteThread_Exit();
+void LatteIndices_invalidateAll(); // LatteIndices.cpp (declared here: LatteIndices.h needs Renderer.h first)
 
 // --- Savestate support -------------------------------------------------
 // See Latte.h for why this is separate from Latte_Stop()/Latte_Start().
